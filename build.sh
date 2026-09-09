@@ -8,7 +8,9 @@
 # The Info.plist is written whole rather than patched: PlistBuddy writes these keys
 # correctly and then aborts on exit, so a patch-based build fails after succeeding.
 set -e
-ROOT="$HOME/.dia-router"
+# The checkout, wherever it sits. The *app* path below is the fixed one; the source is
+# not, so it is derived rather than written down.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$HOME/Applications/DiaRouter.app"
 LS=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 

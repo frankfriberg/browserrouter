@@ -32,6 +32,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // open editor keeps it alive, so a link clicked while looking at the rules is
         // routed instead of killing the window mid-edit.
         if !resident, window == nil { NSApp.terminate(nil) }
+        demoteAfterRouting()
+    }
+
+    /// **Delivering a url promotes the handler to a foreground app, and nothing here asks
+    /// for it.** LaunchServices does it to whichever bundle it hands the link to, so the
+    /// resident router acquires a Dock icon per click even though it launched as an
+    /// accessory. Measured with `lsappinfo`: a router freshly kickstarted reads `UIElement`
+    /// until the first link arrives and `Foreground` a moment after.
+    ///
+    /// So the policy is re-asserted once the promotion has landed — and only when there is
+    /// no editor window, which is the one thing that is allowed to own a Dock icon.
+    private func demoteAfterRouting() {
+        guard resident else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, self.window == nil else { return }
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
