@@ -50,6 +50,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <!-- **The only thing that keeps the Dock icon from flashing on every link.** Delivering
+       a url promotes the handler to a foreground app, and the promotion lands after the
+       handler returns, so demoting from inside the app can only ever undo a blink that has
+       already been seen. This is the key LaunchServices itself reads, and it does not cost
+       the app its place in the default-browser list. -->
+  <key>LSUIElement</key><true/>
   <!-- Required to drive Dia. Without it the Automation prompt has nothing to say and the
        request is refused rather than asked. -->
   <key>NSAppleEventsUsageDescription</key>
