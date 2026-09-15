@@ -15,6 +15,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT="$ROOT/build"
 STAGE="$OUT/dmg"
 DMG="$OUT/DiaRouter.dmg"
+LS=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"
@@ -54,6 +55,12 @@ MNT="$(hdiutil attach -nobrowse -noverify "$RW" | grep /Volumes/ | sed 's/.*\(\/
 cp "$ROOT/icon/AppIcon.icns" "$MNT/.VolumeIcon.icns"
 # The icns alone does nothing; the custom-icon bit on the volume is what Finder reads.
 SetFile -a C "$MNT"
+# **Mounting the image registers the app inside it**, and that record outlives the volume:
+# LaunchServices then holds two bundles with this identifier and the same version, one of
+# them on a path that no longer exists. It picks between them by version, so the dead one
+# can win — which looks, from the app, like a default-browser change that fails on a file
+# nobody named. Withdrawn here, while there is still a path to name.
+"$LS" -u "$MNT/DiaRouter.app" 2>/dev/null || true
 hdiutil detach "$MNT" -quiet
 hdiutil convert -quiet "$RW" -format UDZO -o "$DMG"
 rm -f "$RW"
@@ -90,5 +97,10 @@ guard let img = NSImage(contentsOfFile: a[2]),
 SWIFT
 swift "$SETICON" "$DMG" "$ROOT/icon/AppIcon.icns"
 rm -f "$SETICON"
+
+# **The staged copy registers itself**, without help from build.sh, simply by existing
+# somewhere LaunchServices scans. It is the same identifier and version as the installed
+# app, so it is left withdrawn rather than competing with it.
+"$LS" -u "$STAGE/DiaRouter.app" 2>/dev/null || true
 
 echo "built $DMG"
