@@ -11,7 +11,14 @@ set -e
 # The checkout, wherever it sits. The *app* path below is the fixed one; the source is
 # not, so it is derived rather than written down.
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$HOME/Applications/DiaRouter.app"
+# The install target. Overridable **only** so the packager can stage a copy for a dmg;
+# an ordinary build still lands on the one fixed path the browser binding is attached to.
+APP="${DIAROUTER_APP:-$HOME/Applications/DiaRouter.app}"
+# Staging builds are nobody's handler yet, so they neither register nor restart anything.
+STAGED=$([ -n "$DIAROUTER_APP" ] && echo 1 || echo "")
+# Ad-hoc by default; a Developer ID identity, when there is one, is what makes the dmg
+# openable on someone else's Mac without the right-click dance.
+SIGN_ID="${DIAROUTER_SIGN_ID:--}"
 LS=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 rm -rf "$APP"
@@ -19,7 +26,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -swift-version 5 -O \
   "$ROOT/src/Rules.swift" "$ROOT/src/Store.swift" "$ROOT/src/Router.swift" \
-  "$ROOT/src/UI.swift" "$ROOT/src/main.swift" \
+  "$ROOT/src/Setup.swift" "$ROOT/src/UI.swift" "$ROOT/src/main.swift" \
   -o "$APP/Contents/MacOS/DiaRouter"
 
 # The icon is drawn by src's sibling tool rather than stored as a blob, so a change to it
@@ -84,8 +91,30 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --deep -s - "$APP" 2>/dev/null
-"$LS" -f "$APP"
+# The hardened runtime and a secure timestamp are what notarization requires, and both
+# are meaningless for an ad-hoc signature, so they go on only with a real identity.
+if [ "$SIGN_ID" = "-" ]; then
+  codesign --force --deep -s - "$APP"
+else
+  # **The hardened runtime refuses Apple events unless the app asks for them**, and a
+  # refusal here is silent at build time and fatal at the first link: the send fails
+  # outright rather than raising the Automation prompt. The usage string in Info.plist
+  # is what the prompt *says*; this is what makes there be a prompt at all.
+  ENT="$(mktemp -t diarouter).plist"
+  cat > "$ENT" <<'ENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>
+ENTS
+  codesign --force --deep --options runtime --timestamp \
+    --entitlements "$ENT" -s "$SIGN_ID" "$APP"
+  rm -f "$ENT"
+fi
+[ -n "$STAGED" ] || "$LS" -f "$APP"
 
 # **Checked by reading it back**, because a bundle that builds and is not offered a single
 # link looks identical to one that works until you click something.
@@ -96,7 +125,7 @@ done
 # **A rebuild has to replace the resident process.** Otherwise the old binary keeps
 # handling every link and the change looks like it did not take.
 AGENT="gui/$(id -u)/com.frankfriberg.diarouter"
-if launchctl print "$AGENT" >/dev/null 2>&1; then
+if [ -z "$STAGED" ] && launchctl print "$AGENT" >/dev/null 2>&1; then
   osascript -e 'tell application "DiaRouter" to quit' >/dev/null 2>&1 || true
   sleep 1
   launchctl kickstart -k "$AGENT" >/dev/null 2>&1 || true
