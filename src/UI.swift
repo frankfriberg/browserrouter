@@ -212,7 +212,7 @@ struct RuleEditor: View {
 @Observable final class SetupModel {
     var isDefault = false
     var atLogin = false
-    var error: String?
+    var error: Setup.Refusal?
     var working = false
 
     var isComplete: Bool { isDefault && atLogin }
@@ -239,7 +239,7 @@ struct RuleEditor: View {
     func startAtLogin() {
         working = true
         error = nil
-        error = Setup.installLoginAgent()
+        error = Setup.installLoginAgent().map { Setup.Refusal(message: $0, needsSystemSettings: false) }
         working = false
         refresh()
     }
@@ -281,8 +281,16 @@ struct WelcomeSheet: View {
             ) { setup.startAtLogin() }
 
             if let error = setup.error {
-                Text(error).font(.callout).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(error.message).font(.callout).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // **Only offered when the button cannot do it.** A link to System
+                    // Settings beside a button that works is a second way to do the same
+                    // thing, and the slower one.
+                    if error.needsSystemSettings {
+                        Button("Open System Settings") { Setup.openDefaultBrowserSettings() }
+                    }
+                }
             }
 
             HStack {
@@ -299,6 +307,9 @@ struct WelcomeSheet: View {
         .padding(20)
         .frame(width: 520)
         .onAppear { setup.refresh() }
+        // Escape leaves the panel the same way the button does; a sheet that only closes
+        // one way is a sheet that traps ⌘Q behind it.
+        .onExitCommand { close() }
     }
 }
 

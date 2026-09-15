@@ -37,24 +37,57 @@ enum Setup {
         return Bundle(url: app)?.bundleIdentifier
     }
 
+    /// What a failed attempt reports back: a sentence to show, and whether the way forward
+    /// is System Settings rather than the same button again.
+    struct Refusal {
+        let message: String
+        let needsSystemSettings: Bool
+    }
+
     /// **The confirmation is the system's, not ours.** There is no way to take the default
     /// quietly, and a system prompt raised from a background app is a prompt nobody sees —
     /// hence the activate first.
-    static func makeDefaultBrowser(_ done: @escaping (String?) -> Void) {
+    ///
+    /// **The scheme asked for is `http`, and it has to be.** Asking for `https` — the one
+    /// every link in the setup panel actually starts with — answers `permErr` (-54) without
+    /// raising a dialog or changing anything, on any bundle, signed or ad-hoc, agent or
+    /// regular app. `http` raises the dialog and carries `https` with it, which is why the
+    /// second scheme below is almost always already done by the time it is checked.
+    static func makeDefaultBrowser(_ done: @escaping (Refusal?) -> Void) {
         NSApp.activate(ignoringOtherApps: true)
         let bundle = Bundle.main.bundleURL
-        NSWorkspace.shared.setDefaultApplication(at: bundle, toOpenURLsWithScheme: "https") { error in
+        NSWorkspace.shared.setDefaultApplication(at: bundle, toOpenURLsWithScheme: "http") { error in
             DispatchQueue.main.async {
-                if let error { done(error.localizedDescription); return }
-                // **http is set only if it did not follow.** Changing the https handler
-                // normally moves http with it, and asking for a scheme that is already ours
-                // buys a second identical dialog for nothing.
-                guard handler(for: "http") != Bundle.main.bundleIdentifier else { done(nil); return }
-                NSWorkspace.shared.setDefaultApplication(at: bundle, toOpenURLsWithScheme: "http") { error in
-                    DispatchQueue.main.async { done(error?.localizedDescription) }
+                if let error { done(refusal(error)); return }
+                // **https is set only if it did not follow.** It normally moves with http,
+                // and asking for a scheme that is already ours buys a second identical
+                // dialog for nothing.
+                guard handler(for: "https") != Bundle.main.bundleIdentifier else { done(nil); return }
+                NSWorkspace.shared.setDefaultApplication(at: bundle, toOpenURLsWithScheme: "https") { error in
+                    DispatchQueue.main.async { done(error.map(refusal)) }
                 }
             }
         }
+    }
+
+    /// `permErr` arrives wrapped in a Cocoa error whose description names a file nobody
+    /// mentioned, so the diagnosis is read from the innermost error rather than the top.
+    private static func refusal(_ error: Error) -> Refusal {
+        var underlying = error as NSError
+        while let next = underlying.userInfo[NSUnderlyingErrorKey] as? NSError { underlying = next }
+        guard underlying.domain == NSOSStatusErrorDomain, underlying.code == -54 else {
+            return Refusal(message: error.localizedDescription, needsSystemSettings: false)
+        }
+        return Refusal(
+            message: "macOS would not let DiaRouter take the default on its own. Pick DiaRouter under \u{201C}Default web browser\u{201D} in System Settings instead.",
+            needsSystemSettings: true)
+    }
+
+    /// The pane that holds "Default web browser" — the choice macOS always honours, because
+    /// there it is the user making it rather than an app asking on their behalf.
+    static func openDefaultBrowserSettings() {
+        guard let pane = URL(string: "x-apple.systempreferences:com.apple.Desktop-Settings.extension") else { return }
+        NSWorkspace.shared.open(pane)
     }
 
     /// The same agent `install-login-agent.sh` writes, written from inside the app instead:

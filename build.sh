@@ -78,13 +78,19 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     </dict>
   </array>
   <!-- What a real browser declares beside the schemes. -->
+  <!-- **`public.xhtml` is what makes this a browser as far as System Settings is
+       concerned.** Its "Default web browser" menu lists the apps that claim the http
+       scheme *and* xhtml; declaring http/https and `public.html` alone puts the app in
+       LaunchServices' handler tables and nowhere a user can see — measured against the
+       menu's own contents, which match that intersection exactly. -->
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
       <key>CFBundleTypeName</key><string>HTML document</string>
       <key>CFBundleTypeRole</key><string>Viewer</string>
       <key>LSHandlerRank</key><string>Alternate</string>
-      <key>LSItemContentTypes</key><array><string>public.html</string></array>
+      <key>LSItemContentTypes</key>
+      <array><string>public.html</string><string>public.xhtml</string></array>
     </dict>
   </array>
 </dict>
