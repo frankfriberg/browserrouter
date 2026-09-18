@@ -4,3 +4,5 @@ build/
 DiaRouter.app/
 rules.tsv
 vendor/
+icon/makeicon
+icon/*.iconset/
