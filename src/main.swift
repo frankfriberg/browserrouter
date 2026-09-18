@@ -167,16 +167,11 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
     switch flag {
     case "--explain":
         for u in urls {
-            let d = decide(u, against: settings.rules, handingOff: settings.apps,
-                           fallback: settings.fallback)
-            let name: String
-            switch d.verdict {
-            case .app(let a): name = a.rawValue
-            case .target(let t): name = t.token
-            }
+            let d = decide(u, against: settings.rules, fallback: settings.fallback)
+            let name = d.target.token
             // The deep link is the part worth seeing: it is the thing that either resolves
             // in the app or does not.
-            if case .app(let a) = d.verdict, let deep = a.deepLink(for: u) {
+            if let deep = d.target.deepLink(for: u) {
                 print("\(name)\t\(d.reason)\t\(deep.absoluteString)")
             } else {
                 print("\(name)\t\(d.reason)\t\(u)")
@@ -187,12 +182,11 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
             print(Router.open(u, settings).rawValue)
         }
     case "--list":
-        for a in Handoff.allCases where settings.apps.contains(a) {
-            print("app\t\(a.rawValue)")
-        }
         print("default\t\(settings.fallback.token)")
-        for r in Rule.sortedBySpecificity(settings.rules) {
-            print("\(r.target.token)\t\(r.kind.rawValue)\t\(r.pattern)")
+        // In list order, because that is the order they are consulted in and the numbers
+        // are what a `--explain` line points back at.
+        for (i, r) in settings.rules.enumerated() {
+            print("\(i + 1)\t\(r.target.token)\t\(r.kind.rawValue)\t\(r.pattern)")
         }
     default:
         FileHandle.standardError.write(Data("usage: BrowserRouter [--explain|--route|--list] <url>...\n".utf8))

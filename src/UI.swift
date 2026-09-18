@@ -12,8 +12,7 @@ final class Model: ObservableObject {
     var decision: Decision? {
         let u = probe.trimmingCharacters(in: .whitespaces)
         guard u.contains("://") else { return nil }
-        return decide(u, against: settings.rules, handingOff: settings.apps,
-                      fallback: settings.fallback)
+        return decide(u, against: settings.rules, fallback: settings.fallback)
     }
 
     var fallback: Target { settings.fallback }
@@ -23,9 +22,29 @@ final class Model: ObservableObject {
         Store.save(settings)
     }
 
+    /// **Inserted by specificity, never appended.** First match wins, so appending a broad
+    /// rule to the bottom would look harmless and do nothing, and appending it to the top
+    /// would shadow everything narrower. Placed where it would have ranked, it is right
+    /// without anyone thinking about it — and can still be dragged anywhere afterwards.
     func add(_ rule: Rule) {
-        settings.rules.append(rule)
+        settings.rules.insert(rule, at: Rule.insertionIndex(for: rule, into: settings.rules))
         Store.save(settings)
+    }
+
+    /// A preset adds ordinary rules, and skips the ones already there — clicking Linear
+    /// twice should not give you two identical lines.
+    func addPreset(_ app: Handoff) {
+        for rule in app.suggestedRules
+        where !settings.rules.contains(where: { $0.target == rule.target && $0.pattern == rule.pattern }) {
+            settings.rules.insert(rule, at: Rule.insertionIndex(for: rule, into: settings.rules))
+        }
+        Store.save(settings)
+    }
+
+    func has(_ app: Handoff) -> Bool {
+        app.suggestedRules.allSatisfy { r in
+            settings.rules.contains { $0.target == r.target && $0.pattern == r.pattern }
+        }
     }
 
     func remove(_ ids: Set<Rule.ID>) {
@@ -33,11 +52,25 @@ final class Model: ObservableObject {
         Store.save(settings)
     }
 
-    func hands(to app: Handoff) -> Bool { settings.apps.contains(app) }
-
-    func setHandoff(_ app: Handoff, _ on: Bool) {
-        if on { settings.apps.insert(app) } else { settings.apps.remove(app) }
+    /// Move the selected rules one place up or down, keeping them together and in order.
+    /// **Buttons rather than dragging**: `Table` has no `onMove`, and `draggable` is macOS
+    /// 13 while this app runs on 12.
+    func move(_ ids: Set<Rule.ID>, by offset: Int) {
+        let indices = settings.rules.indices.filter { ids.contains(settings.rules[$0].id) }
+        guard !indices.isEmpty else { return }
+        guard let first = indices.first, let last = indices.last else { return }
+        if offset < 0 { guard first > 0 else { return } }
+        if offset > 0 { guard last < settings.rules.count - 1 else { return } }
+        for i in (offset < 0 ? indices : indices.reversed()) {
+            settings.rules.swapAt(i, i + offset)
+        }
         Store.save(settings)
+    }
+
+    func canMove(_ ids: Set<Rule.ID>, by offset: Int) -> Bool {
+        let indices = settings.rules.indices.filter { ids.contains(settings.rules[$0].id) }
+        guard let first = indices.first, let last = indices.last else { return false }
+        return offset < 0 ? first > 0 : last < settings.rules.count - 1
     }
 }
 
@@ -62,7 +95,15 @@ extension Browser {
 }
 
 extension Target {
-    var tint: Color { browser.tint }
+    /// **Apps get one colour between them**, deliberately: the column's job is to say at a
+    /// glance "this one does not open a browser at all", and which app it is is written
+    /// beside the dot anyway.
+    var tint: Color {
+        switch self {
+        case .browser(let b, _): return b.tint
+        case .app: return Color(red: 0.35, green: 0.75, blue: 0.45)
+        }
+    }
 }
 
 /// The browsers a rule can point at: the installed ones, plus whatever the rule being
@@ -84,15 +125,19 @@ struct RulesWindow: View {
         var id: String { rawValue }
     }
 
-    private var ordered: [Rule] { Rule.sortedBySpecificity(model.rules) }
+    /// **No sort anywhere.** The list is what the user arranged, and reordering it for
+    /// display would mean the numbers in the tester point at rows that are not there.
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            table
+            // **The table takes whatever height is going.** It is the thing being edited;
+            // the three sections under it are fixed-size and would otherwise squeeze it to
+            // six visible rows, which is fewer rules than a real setup has.
+            table.layoutPriority(1)
             Divider()
-            handoffs
+            presets
             Divider()
             fallbackRow
             Divider()
@@ -101,7 +146,7 @@ struct RulesWindow: View {
         // **Sized for the longest pattern, not for the shortest.** At 560 the pattern
         // column truncates `github.com/acme-solutions`, which is the one column whose
         // whole job is to be read exactly.
-        .frame(minWidth: 680, idealWidth: 720, minHeight: 720, idealHeight: 820)
+        .frame(minWidth: 680, idealWidth: 760, minHeight: 720, idealHeight: 900)
         .sheet(item: $sheet) { which in
             switch which {
             case .welcome: WelcomeSheet { Setup.hasBeenOffered = true; sheet = nil }
@@ -119,10 +164,9 @@ struct RulesWindow: View {
         VStack(alignment: .leading, spacing: 3) {
             Text("Where a link opens")
                 .font(.title3.weight(.semibold))
-            // **The precedence is stated where the rules are listed.** A list read top to
-            // bottom implies the first line wins, and someone would go hunting for a bug
-            // when it does not.
-            Text("The most specific rule wins, whatever order these are in. Anything unmatched goes to the default below.")
+            // **The precedence is stated where the rules are listed**, and it is now the
+            // one a list read top to bottom already implies.
+            Text("The first rule that matches wins, so order decides. New rules are placed narrowest first; move one up to give it priority. Anything unmatched goes to the default below.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -133,7 +177,15 @@ struct RulesWindow: View {
 
     private var table: some View {
         VStack(spacing: 0) {
-            Table(ordered, selection: $selection) {
+            Table(model.rules, selection: $selection) {
+                // The position, because with an ordered list it is half of every answer —
+                // and it is what `--explain` and the tester below both point back at.
+                TableColumn("#") { rule in
+                    Text("\((model.rules.firstIndex { $0.id == rule.id } ?? 0) + 1)")
+                        .foregroundStyle(.tertiary)
+                        .font(.system(.callout, design: .monospaced))
+                }
+                .width(min: 24, ideal: 28)
                 TableColumn("Opens in") { rule in
                     HStack(spacing: 6) {
                         Circle().fill(rule.target.tint).frame(width: 8, height: 8)
@@ -162,6 +214,12 @@ struct RulesWindow: View {
                 Button { model.remove(selection); selection = [] } label: { Image(systemName: "minus") }
                     .disabled(selection.isEmpty)
                     .help("Delete the selected rules")
+                Button { model.move(selection, by: -1) } label: { Image(systemName: "chevron.up") }
+                    .disabled(!model.canMove(selection, by: -1))
+                    .help("Move up, so this rule is tried sooner")
+                Button { model.move(selection, by: 1) } label: { Image(systemName: "chevron.down") }
+                    .disabled(!model.canMove(selection, by: 1))
+                    .help("Move down, so this rule is tried later")
                 Spacer()
                 // The way back to the panel once it has had its one chance, for the day
                 // another browser takes the default back.
@@ -176,22 +234,23 @@ struct RulesWindow: View {
         }
     }
 
-    /// **A checkbox, not a rule.** These sites have their own app, and which one you want
-    /// is the whole question — there is no pattern to write and nothing to rank. An app
-    /// that is not installed is shown anyway, greyed, so the list reads the same on every
-    /// Mac and turning one on after installing it is where you would already be looking.
-    private var handoffs: some View {
+    /// **Presets, not toggles, and the difference is the whole point.** A checkbox says
+    /// the nine apps below are the list; a button that writes `app:linear  host
+    /// linear.app` into the table above says "this is the shape" — and the next thought is
+    /// `app:things  host  culturedcode.com`, which works without anyone adding a case.
+    ///
+    /// An app that is not installed is shown anyway, greyed, so the row reads the same on
+    /// every Mac and adding one after installing it is where you would already be looking.
+    private var presets: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Skip the browser").font(.callout.weight(.medium))
-            Text("These links go straight to the app, before any rule above is looked at.")
+            Text("Add a rule that sends these links straight to the app. They are ordinary rules — edit them, move them, or write your own for any app with a url scheme.")
                 .font(.callout).foregroundStyle(.secondary)
-            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
-                                GridItem(.flexible(), alignment: .leading)],
+                .fixedSize(horizontal: false, vertical: true)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 152), alignment: .leading)],
                       alignment: .leading, spacing: 6) {
                 ForEach(Handoff.allCases) { app in
-                    HandoffToggle(app: app,
-                                  on: model.hands(to: app),
-                                  set: { model.setHandoff(app, $0) })
+                    PresetChip(app: app, added: model.has(app)) { model.addPreset(app) }
                 }
             }
         }
@@ -209,7 +268,8 @@ struct RulesWindow: View {
                 .font(.callout).foregroundStyle(.secondary)
             TargetPicker(label: "Opens in",
                          target: Binding(get: { model.fallback },
-                                         set: { model.setFallback($0) }))
+                                         set: { model.setFallback($0) }),
+                         allowsApp: false)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -223,11 +283,7 @@ struct RulesWindow: View {
                 .font(.system(.body, design: .monospaced))
             if let d = model.decision {
                 HStack(spacing: 8) {
-                    if case .target(let t) = d.verdict {
-                        Circle().fill(t.tint).frame(width: 8, height: 8)
-                    } else {
-                        Circle().fill(Color.accentColor).frame(width: 8, height: 8)
-                    }
+                    Circle().fill(d.target.tint).frame(width: 8, height: 8)
                     Text(d.summary).fontWeight(.medium)
                     Text("·").foregroundStyle(.tertiary)
                     Text(d.reason).foregroundStyle(.secondary)
@@ -243,26 +299,31 @@ struct RulesWindow: View {
     }
 }
 
-private struct HandoffToggle: View {
+/// One preset. Reads as a button before it is used and as a statement of fact after, so
+/// clicking it twice is obviously pointless rather than quietly harmless.
+private struct PresetChip: View {
     let app: Handoff
-    let on: Bool
-    let set: (Bool) -> Void
+    let added: Bool
+    let add: () -> Void
 
     // Read once when the row is built rather than on every redraw: it is a LaunchServices
-    // lookup, and the answer does not change while a sheet is open.
+    // lookup, and the answer does not change while a window is open.
     @State private var installed: Bool?
 
     var body: some View {
-        Toggle(isOn: Binding(get: { on }, set: set)) {
+        Button(action: add) {
             HStack(spacing: 5) {
+                Image(systemName: added ? "checkmark.circle.fill" : "plus.circle")
+                    .foregroundStyle(added ? Color.green : Color.accentColor)
                 Text(app.label)
                 if installed == false {
                     Text("not installed").font(.caption).foregroundStyle(.tertiary)
                 }
             }
         }
-        .disabled(installed == false)
-        .help(app.blurb)
+        .buttonStyle(.plain)
+        .disabled(installed == false || added)
+        .help(added ? "Already in the rules above" : app.blurb)
         .onAppear { if installed == nil { installed = app.installedAt != nil } }
     }
 }
@@ -274,7 +335,7 @@ struct RuleEditor: View {
     let add: (Rule) -> Void
     @Environment(\.dismiss) private var dismiss
 
-    @State private var target = Target(.dia)
+    @State private var target = Target.dia
     @State private var kind: Kind = .prefix
     @State private var pattern = ""
 
@@ -463,64 +524,116 @@ private struct AlternatingRows: ViewModifier {
 }
 
 
-/// A browser, and a profile inside it. **One control, used in both places** — the rule
-/// editor and the fallback row ask exactly the same question, and a second spelling of it
-/// is a second thing to keep right.
+/// Where a link goes. **One control, used in three places** — the rule editor, the
+/// fallback row, and nothing else has to learn the shape of a target.
 ///
-/// The profile side changes shape per browser because the browsers do: a discovered list
-/// where the profiles can be read, a text field where they cannot, and a sentence where
-/// there is nothing to ask.
+/// Three panes, because there are three answers: a browser with a profile picked from a
+/// discovered list, the same with a typed name where the list cannot be read, and an app,
+/// which is just a scheme.
 struct TargetPicker: View {
     let label: String
     @Binding var target: Target
+    /// The fallback cannot be an app: an app that declines a link would leave it nowhere,
+    /// and "nowhere" is the one answer this app must never give.
+    var allowsApp: Bool = true
 
     /// Read when the browser changes rather than on every redraw: for Chromium it is a
     /// json file, and for Dia and Arc it is an Apple event, which is not a thing to send
     /// on the way through a layout pass.
     @State private var discovered: [String] = []
 
-    private var browser: Browser { target.browser }
+    private enum Sort: Hashable { case browser(Browser), app }
+
+    private var sort: Sort {
+        switch target {
+        case .browser(let b, _): return .browser(b)
+        case .app: return .app
+        }
+    }
+
+    private var appName: String {
+        if case .app(let name) = target { return name }
+        return ""
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker(label, selection: Binding(get: { browser },
-                                             set: { target = Target($0, nil) })) {
-                ForEach(selectableBrowsers(including: browser)) { b in
+            Picker(label, selection: Binding(get: { sort }, set: { pick($0) })) {
+                ForEach(selectableBrowsers(including: target.browser)) { b in
                     HStack(spacing: 6) {
                         Circle().fill(b.tint).frame(width: 8, height: 8)
                         Text(b.installedAt == nil ? "\(b.label) (not installed)" : b.label)
                     }
-                    .tag(b)
+                    .tag(Sort.browser(b))
+                }
+                if allowsApp {
+                    Divider()
+                    HStack(spacing: 6) {
+                        Circle().fill(Target.app("").tint).frame(width: 8, height: 8)
+                        Text("An app, not a browser")
+                    }
+                    .tag(Sort.app)
                 }
             }
 
-            if !browser.hasProfiles {
-                // Said once, here, rather than left as a field that accepts a name and
-                // then ignores it.
-                Text("Safari gives no way to choose a profile, so links open in whichever one is in front.")
-                    .font(.callout).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if discovered.isEmpty {
-                // Nothing could be read — the browser has never run, or it is Dia or Arc
-                // and not open right now. A name typed by hand routes exactly as well.
-                TextField("\(browser.profileNoun) name, or blank for whichever is in front",
-                          text: Binding(get: { target.profile ?? "" },
-                                        set: { target = Target(browser, $0) }))
+            switch sort {
+            case .app:
+                // **A url scheme, typed.** Which is all an app handoff has ever been: the
+                // nine with measured rewrites are shortcuts, not the boundary.
+                TextField("url scheme, as in linear, spotify, bear, things",
+                          text: Binding(get: { appName }, set: { target = .app($0.lowercased()) }))
                     .textFieldStyle(.roundedBorder)
-            } else {
-                Picker(browser.profileNoun,
-                       selection: Binding(get: { target.profile ?? "" },
-                                          set: { target = Target(browser, $0) })) {
-                    Text("Whichever is in front").tag("")
-                    ForEach(discovered, id: \.self) { Text($0).tag($0) }
-                    // A rule can name a profile that has since been renamed away. Kept in
-                    // the list so opening the editor does not silently repoint the rule.
-                    if let current = target.profile, !discovered.contains(current) {
-                        Text("\(current) (missing)").tag(current)
+                    .font(.system(.body, design: .monospaced))
+                Text(hint).font(.callout).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+            case .browser(let browser):
+                if !browser.hasProfiles {
+                    // Said once, here, rather than left as a field that accepts a name and
+                    // then ignores it.
+                    Text("Safari gives no way to choose a profile, so links open in whichever one is in front.")
+                        .font(.callout).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if discovered.isEmpty {
+                    // Nothing could be read — the browser has never run, or it is Dia or
+                    // Arc and not open right now. A name typed by hand routes exactly as
+                    // well.
+                    TextField("\(browser.profileNoun) name, or blank for whichever is in front",
+                              text: Binding(get: { target.profile ?? "" },
+                                            set: { target = .browser(browser, $0) }))
+                        .textFieldStyle(.roundedBorder)
+                } else {
+                    Picker(browser.profileNoun,
+                           selection: Binding(get: { target.profile ?? "" },
+                                              set: { target = .browser(browser, $0) })) {
+                        Text("Whichever is in front").tag("")
+                        ForEach(discovered, id: \.self) { Text($0).tag($0) }
+                        // A rule can name a profile that has since been renamed away. Kept
+                        // in the list so opening the editor does not silently repoint it.
+                        if let current = target.profile, !discovered.contains(current) {
+                            Text("\(current) (missing)").tag(current)
+                        }
                     }
                 }
             }
         }
-        .task(id: browser) { discovered = browser.profiles }
+        .task(id: sort) {
+            if case .browser(let b) = sort { discovered = b.profiles } else { discovered = [] }
+        }
+    }
+
+    private var hint: String {
+        guard !appName.isEmpty else {
+            return "Any app that registers a url scheme. The link keeps its path: https://example.com/a/b becomes scheme://a/b."
+        }
+        if let built = Handoff(rawValue: appName) { return built.blurb }
+        return "https://example.com/a/b will open as \(appName)://a/b."
+    }
+
+    private func pick(_ sort: Sort) {
+        switch sort {
+        case .browser(let b): target = .browser(b, nil)
+        case .app: target = .app(appName)
+        }
     }
 }

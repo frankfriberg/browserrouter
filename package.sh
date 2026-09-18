@@ -40,11 +40,13 @@ browsers it routes to: Dia, Arc, Chrome, Brave, Edge, Vivaldi, Safari, Firefox o
    day does not wait for a cold start. Both are one click, and either can be left for
    later — the Setup link in the window brings the panel back.
 3. The window behind that panel is where the rules live: one per line, a host or a url
-   prefix on the left, a browser and one of its profiles on the right. The most
-   specific rule wins, and a row under them says where everything else goes.
-   Under them is a row of checkboxes for sites with their own desktop app — Linear,
-   Figma, Notion, Slack, Teams, Asana, Discord, Zoom, Spotify. Ticked, those links go straight to
-   the app and no browser tab is ever opened.
+   prefix on the left, and on the right either a browser and one of its profiles, or an
+   app. The first rule that matches wins, so the order is what decides — select a rule
+   and use the arrows to move it. A row under them says where everything else goes.
+   Under that is a row of one-click presets for sites with their own desktop app —
+   Linear, Figma, Notion, Slack, Teams, Asana, Discord, Zoom, Spotify. Each adds an
+   ordinary rule you can then edit, move or delete. They are not a fixed list: any app
+   with a url scheme works, so app:bear or app:things routes without anything special.
 4. The first link routed into a browser asks for permission to control it — once per
    browser. Allow it; a refusal is remembered, and undoing it means System Settings →
    Privacy & Security → Automation.

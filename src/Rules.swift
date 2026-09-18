@@ -7,7 +7,6 @@ import Foundation
 /// is no browser behind it to fall through to, so "nothing matched" is a ``Target`` like
 /// any other — the one in ``Settings/fallback`` — and it is chosen rather than implied.
 enum Verdict: Equatable {
-    case app(Handoff)
     case target(Target)
 }
 
@@ -94,17 +93,12 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    private var expressions: [NSRegularExpression] {
-        hosts.compactMap {
-            try? NSRegularExpression(
-                pattern: "^https?://([a-z0-9_-]+\\.)*\(NSRegularExpression.escapedPattern(for: $0))([/?#:]|$)",
-                options: [.caseInsensitive])
-        }
-    }
-
-    func matches(_ url: String) -> Bool {
-        let range = NSRange(url.startIndex..<url.endIndex, in: url)
-        return expressions.contains { $0.firstMatch(in: url, options: [], range: range) != nil }
+    /// **The rules this preset adds, which are ordinary rules and nothing else.** They used
+    /// to be a checkbox, and a checkbox says the list of apps is the whole world; a rule in
+    /// the table says "this is the shape, write another one". `app:things host
+    /// culturedcode.com` is a sentence anyone can copy once they have seen this.
+    var suggestedRules: [Rule] {
+        hosts.map { Rule(target: .app(rawValue), kind: .host, pattern: $0) }
     }
 
     /// The deep link for a url on this host, or nil when the app has no place for it.
@@ -195,7 +189,7 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
-/// A browser, and optionally a profile inside it.
+/// Where a link ends up: a browser, or an app that is not a browser.
 ///
 /// **The profile is a string, not a case.** Every browser here lets its profiles be
 /// renamed, and yours already disagree with themselves — Dia's per-profile prefs call the
@@ -204,46 +198,107 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
 ///
 /// A nil profile means "wherever this browser would have put it", which is the only thing
 /// Safari can be asked for and a perfectly ordinary thing to want from the others.
-struct Target: Hashable {
-    var browser: Browser
-    var profile: String?
+///
+/// **`app` is a name, not a case**, and that is the whole point of it. A name this build
+/// knows — `linear`, `zoom`, `spotify` — gets the rewrite that was measured against that
+/// app. A name it has never heard of gets the plain one: the scheme swapped for the name
+/// and the path left alone, which is what Linear and Figma turn out to need anyway. So
+/// `app:bear` routes without anyone having taught this app about Bear.
+enum Target: Hashable {
+    case browser(Browser, profile: String?)
+    case app(String)
 
-    init(_ browser: Browser, _ profile: String? = nil) {
-        self.browser = browser
+    static let dia = Target.browser(.dia, profile: nil)
+
+    static func browser(_ b: Browser, _ profile: String?) -> Target {
         // An empty string is a profile nobody can have, and it arrives from a text field
         // that has been cleared. Stored as nil so it cannot be looked up and missed.
         let trimmed = profile?.trimmingCharacters(in: .whitespaces)
-        self.profile = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        return .browser(b, profile: (trimmed?.isEmpty ?? true) ? nil : trimmed)
     }
 
-    static let dia = Target(.dia)
+    /// The browser this points at, or nil when it points at an app.
+    var browser: Browser? {
+        if case .browser(let b, _) = self { return b }
+        return nil
+    }
 
-    /// How the target is written in rules.tsv: `chrome`, or `chrome:Work`.
+    var profile: String? {
+        if case .browser(_, let p) = self { return p }
+        return nil
+    }
+
+    /// The built-in this name refers to, or nil for one written by hand. **Nil is not a
+    /// failure** — it is the ordinary case for any app nobody has measured.
+    var handoff: Handoff? {
+        if case .app(let name) = self { return Handoff(rawValue: name) }
+        return nil
+    }
+
+    /// How the target is written in rules.tsv: `chrome`, `chrome:Work`, or `app:linear`.
     ///
-    /// **Split on the first colon only**, because a profile may contain one and a browser
-    /// name never does.
-    var token: String { profile.map { "\(browser.rawValue):\($0)" } ?? browser.rawValue }
+    /// **Split on the first colon only**, because a profile may contain one and neither a
+    /// browser name nor `app` ever does.
+    var token: String {
+        switch self {
+        case .browser(let b, let p): return p.map { "\(b.rawValue):\($0)" } ?? b.rawValue
+        case .app(let name): return "app:\(name)"
+        }
+    }
 
     /// The label the editor and the `--explain` output both use.
-    var label: String { profile.map { "\(browser.label) — \($0)" } ?? browser.label }
+    var label: String {
+        switch self {
+        case .browser(let b, let p): return p.map { "\(b.label) — \($0)" } ?? b.label
+        case .app(let name): return (Handoff(rawValue: name)?.label ?? name.capitalized) + " app"
+        }
+    }
 
     init?(token: String) {
         // **The two names the file used to hold.** Rules written before there was more
         // than one browser said `work` and `personal`, and those files are still on disk
         // and still hand-edited; they are read as what they always meant.
         switch token {
-        case "work": self.init(.dia, "All Gravy"); return
-        case "personal": self.init(.dia, "Personal"); return
+        case "work": self = .browser(.dia, "All Gravy"); return
+        case "personal": self = .browser(.dia, "Personal"); return
         default: break
         }
         let parts = token.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-        guard let browser = Browser(rawValue: String(parts[0]).lowercased()) else { return nil }
-        self.init(browser, parts.count > 1 ? String(parts[1]) : nil)
+        let head = String(parts[0]).lowercased()
+        let tail = parts.count > 1 ? String(parts[1]) : nil
+        if head == "app" {
+            guard let name = tail?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { return nil }
+            self = .app(name.lowercased())
+            return
+        }
+        guard let browser = Browser(rawValue: head) else { return nil }
+        self = .browser(browser, tail)
+    }
+
+    /// The url to hand the app, or nil when this app has no place for it.
+    ///
+    /// **Nil is a real answer, not a failure.** `zoom.us/pricing` is a web page and always
+    /// was; handing it to the Zoom app would open a meeting joiner onto nothing. Returning
+    /// nil is what sends the link back down the list to whatever rule matches next.
+    func deepLink(for url: String) -> URL? {
+        guard case .app(let name) = self else { return nil }
+        if let built = Handoff(rawValue: name) { return built.deepLink(for: url) }
+        // The plain rewrite: keep everything after the host, swap the scheme for the name.
+        // Deliberately the same shape as Linear's and Figma's, which is the one that turns
+        // out to be right whenever an app has not invented something of its own.
+        guard let parts = URLComponents(string: url) else { return nil }
+        var tail = parts.percentEncodedPath
+        if let q = parts.percentEncodedQuery { tail += "?" + q }
+        if let f = parts.percentEncodedFragment { tail += "#" + f }
+        let rest = tail.hasPrefix("/") ? String(tail.dropFirst()) : tail
+        guard !rest.isEmpty else { return nil }
+        return URL(string: "\(name)://\(rest)")
     }
 }
 
-/// How a pattern is matched. **The order of these cases is the precedence**, most specific
-/// first — see ``Rule/sortedBySpecificity(_:)``.
+/// How a pattern is matched. The order of these cases is how specific each kind is, most
+/// specific first — see ``Rule/sortedBySpecificity(_:)``, which is now only where a rule is
+/// *placed*, not which one wins.
 enum Kind: String, CaseIterable, Identifiable, Hashable {
     case regex, prefix, pathhas, host
     var id: String { rawValue }
@@ -326,16 +381,25 @@ struct Rule: Identifiable, Hashable {
         NSRegularExpression.escapedPattern(for: s)
     }
 
-    /// **Specificity decides which rule wins, never the order rules are stored in.** A
-    /// `prefix github.com/acme` beats a `host github.com` on its own, so adding a broad
-    /// rule cannot shadow a narrow one that someone forgot to keep above it.
-    static func sortedBySpecificity(_ rules: [Rule]) -> [Rule] {
+    /// How specific a rule is: a smaller number is narrower. Not a ranking any more — it
+    /// decides where a new rule is *inserted*, which is a suggestion the user can drag
+    /// away from.
+    var specificity: (Int, Int) {
         let rank: [Kind: Int] = [.regex: 0, .prefix: 1, .pathhas: 2, .host: 3]
-        return rules.sorted {
-            let a = rank[$0.kind] ?? 9, b = rank[$1.kind] ?? 9
-            if a != b { return a < b }
-            return $0.pattern.count > $1.pattern.count
-        }
+        return (rank[kind] ?? 9, -pattern.count)
+    }
+
+    /// **The list is ordered and the first match wins, so this is not what decides.** It is
+    /// how an existing file is seeded and where a new rule lands, which between them mean
+    /// the naive case is still correct without anyone thinking about order: a broad rule
+    /// added later goes *below* the narrow one it would otherwise have shadowed.
+    static func sortedBySpecificity(_ rules: [Rule]) -> [Rule] {
+        rules.sorted { $0.specificity < $1.specificity }
+    }
+
+    /// Where a new rule belongs in a list that is otherwise in specificity order.
+    static func insertionIndex(for rule: Rule, into rules: [Rule]) -> Int {
+        rules.firstIndex { rule.specificity < $0.specificity } ?? rules.count
     }
 }
 
@@ -343,30 +407,38 @@ struct Rule: Identifiable, Hashable {
 struct Decision {
     var verdict: Verdict
     var rule: Rule?
+    /// Which line decided, counting from 1, or nil when nothing matched. **Shown, because
+    /// with an ordered list the position is half the answer** — a rule that loses does so
+    /// for a reason you can point at.
+    var position: Int?
 
-    var summary: String {
-        switch verdict {
-        case .app(let a): return "The \(a.label) app"
-        case .target(let t): return t.label
-        }
+    var summary: String { target.label }
+
+    var target: Target {
+        if case .target(let t) = verdict { return t }
+        return .dia
     }
 
     var reason: String {
-        if case .app(let a) = verdict { return "\(a.rawValue) handoff" }
         guard let rule else { return "no rule matched" }
-        return "\(rule.kind.rawValue) \(rule.pattern)"
+        let where_ = position.map { "#\($0) " } ?? ""
+        return "\(where_)\(rule.kind.rawValue) \(rule.pattern)"
     }
 }
 
-/// **Handoffs are asked first and rules are not consulted at all when one answers.** They
-/// are not more specific rules, they are a different question — see ``Handoff``.
-func decide(_ url: String, against rules: [Rule], handingOff apps: Set<Handoff> = [],
-            fallback: Target = .dia) -> Decision {
-    for app in Handoff.allCases where apps.contains(app) && app.matches(url) {
-        if app.deepLink(for: url) != nil { return Decision(verdict: .app(app), rule: nil) }
+/// **The first rule that matches wins, and the list is in the order the user put it in.**
+/// That is the model everyone already knows from firewall and routing tables, and it is
+/// the only one in which "open Linear links in the Linear app, except the ones for this
+/// team" can be said at all. The cost is that a broad rule placed above a narrow one
+/// shadows it, which is why nothing ever *appends*: see ``Rule/insertionIndex(for:into:)``.
+///
+/// **A rule pointing at an app can decline.** `zoom.us/pricing` is a web page, and the Zoom
+/// app has nowhere to put it; that rule is skipped and the search carries on down the list
+/// rather than the link being handed somewhere it cannot open.
+func decide(_ url: String, against rules: [Rule], fallback: Target = .dia) -> Decision {
+    for (index, rule) in rules.enumerated() where rule.matches(url) {
+        if case .app = rule.target, rule.target.deepLink(for: url) == nil { continue }
+        return Decision(verdict: .target(rule.target), rule: rule, position: index + 1)
     }
-    for rule in Rule.sortedBySpecificity(rules) where rule.matches(url) {
-        return Decision(verdict: .target(rule.target), rule: rule)
-    }
-    return Decision(verdict: .target(fallback), rule: nil)
+    return Decision(verdict: .target(fallback), rule: nil, position: nil)
 }

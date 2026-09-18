@@ -21,56 +21,81 @@ enum Router {
     /// click that does nothing at all, with nowhere for the user to look.
     @discardableResult
     static func open(_ url: String, _ settings: Settings) -> Outcome {
-        // **The handoff is tried before a browser is involved, and it is allowed to fail.**
-        // An app that has been deleted since the toggle was set must not swallow the link,
-        // so a refusal falls through to the rules exactly as if the toggle were off.
-        let decision = decide(url, against: settings.rules,
-                              handingOff: settings.apps, fallback: settings.fallback)
-        if case .app(let handoff) = decision.verdict, handoff.hand(url) { return .handedOff }
+        // **A rule pointing at an app is allowed to fail, and failing drops it.** The app
+        // may have been deleted since the rule was written, or may refuse the link; either
+        // way the link must carry on down the list exactly as if that line were not there,
+        // rather than being swallowed by an app that cannot open it.
+        var rules = settings.rules
+        for _ in 0...settings.rules.count {
+            let decision = decide(url, against: rules, fallback: settings.fallback)
+            let target = decision.target
 
-        // The handoff refused, so the rules decide after all — asked again without the
-        // apps, because the answer to "which browser" is a different question.
-        let target: Target
-        if case .target(let t) = decision.verdict {
-            target = t
-        } else {
-            let browserOnly = decide(url, against: settings.rules, fallback: settings.fallback)
-            guard case .target(let t) = browserOnly.verdict else { return .failed }
-            target = t
-        }
+            if case .app = target {
+                if hand(url, to: target) { return .handedOff }
+                guard let failed = decision.rule,
+                      let index = rules.firstIndex(where: { $0.id == failed.id })
+                else { break }
+                rules.remove(at: index)
+                continue
+            }
 
-        let outcome = route(url, to: target)
-        switch outcome {
-        case .focused, .created, .launched:
-            return outcome
-        default:
-            // Everything specific has failed: the profile is gone, the script was refused,
-            // the browser would not talk. The link still has to open, so it opens the only
-            // way left — plainly, in that browser, or in the fallback one if it is not
-            // there at all.
-            _ = launch(target.browser, url: url) || launch(settings.fallback.browser, url: url)
-                || Browser.allCases.contains { $0.installedAt != nil && launch($0, url: url) }
-            return outcome
+            let outcome = route(url, to: target)
+            switch outcome {
+            case .focused, .created, .launched, .handedOff:
+                return outcome
+            default:
+                // Everything specific has failed: the profile is gone, the script was
+                // refused, the browser would not talk. The link still has to open, so it
+                // opens the only way left — plainly, in that browser, or in the fallback
+                // one if it is not there at all.
+                let browser = target.browser ?? settings.fallback.browser ?? .safari
+                _ = launch(browser, url: url)
+                    || launch(settings.fallback.browser ?? .safari, url: url)
+                    || Browser.allCases.contains { $0.installedAt != nil && launch($0, url: url) }
+                return outcome
+            }
         }
+        // Every app rule in the way refused and nothing else matched. The fallback browser
+        // is the last thing standing.
+        return route(url, to: settings.fallback)
+    }
+
+    /// Hand the url to an app rather than a browser. False means it did not go, and the
+    /// caller should carry on down the list.
+    ///
+    /// **A built-in is opened at its bundle; anything else is opened at its scheme.**
+    /// Naming the bundle is what stops `linear://` going to whatever registered last, and
+    /// it is only possible for the apps whose identifiers are written down. For a name
+    /// someone typed, LaunchServices' own answer is the only answer there is — and it is
+    /// the right one, since the user picked the scheme precisely because an app claims it.
+    private static func hand(_ url: String, to target: Target) -> Bool {
+        guard let deep = target.deepLink(for: url) else { return false }
+        if let built = target.handoff {
+            guard let application = built.installedAt else { return false }
+            return openWaiting([deep], at: application)
+        }
+        guard NSWorkspace.shared.urlForApplication(toOpen: deep) != nil else { return false }
+        return NSWorkspace.shared.open(deep)
     }
 
     private static func route(_ url: String, to target: Target) -> Outcome {
-        guard let app = target.browser.installedAt else { return .failed }
-        switch target.browser.mechanism {
+        if case .app = target { return hand(url, to: target) ? .handedOff : .failed }
+        guard let browser = target.browser, let app = browser.installedAt else { return .failed }
+        switch browser.mechanism {
         case .dia:
             return dia(url, profile: target.profile)
         case .arc:
             return arc(url, profile: target.profile)
         case .chromium(let support):
-            return chromium(url, target.browser, app: app, support: support, profile: target.profile)
+            return chromium(url, browser, app: app, support: support, profile: target.profile)
         case .gecko(_, let executable):
             return gecko(url, app: app, executable: executable, profile: target.profile)
         case .none:
             // Safari, and anything else with no way to be told. Focusing a tab that is
             // already showing the url is the whole of what can be done here, and it is
             // worth doing: it is the difference between one tab and eleven.
-            if focusExistingTab(url, in: target.browser) { return .focused }
-            return launch(target.browser, url: url) ? .launched : .failed
+            if focusExistingTab(url, in: browser) { return .focused }
+            return launch(browser, url: url) ? .launched : .failed
         }
     }
 
@@ -390,6 +415,21 @@ enum Router {
         return done.wait(timeout: .now() + 10) == .timedOut ? true : opened
     }
 
+    /// **Waited on, because the caller may terminate the process as soon as this returns**
+    /// — a cold launch does exactly that. The timeout is long enough for a cold app launch
+    /// and short enough that a wedged one still lets the link through.
+    @discardableResult
+    private static func openWaiting(_ urls: [URL], at application: URL) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        var opened = true
+        NSWorkspace.shared.open(urls, withApplicationAt: application,
+                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            opened = error == nil
+            done.signal()
+        }
+        return done.wait(timeout: .now() + 10) == .timedOut ? true : opened
+    }
+
     /// A trailing slash is not a different page. Nothing else is normalised away: a
     /// fragment and a query each name somewhere specific, so a link to one comment on a
     /// pull request must not be answered by focusing the tab showing the whole thread.
@@ -422,31 +462,10 @@ enum Router {
 }
 
 extension Handoff {
-    /// Where the app is, or nil when it is not installed. **This is what the toggle is
-    /// enabled by**: a handoff to an app that is not there is a link that goes nowhere.
+    /// Where the app is, or nil when it is not installed. **This is what a preset is
+    /// offered by**: a rule pointing at an app that is not there is a rule that can only
+    /// ever be skipped.
     var installedAt: URL? {
         bundleIDs.lazy.compactMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.first
-    }
-
-    /// Hand the url to the app. False means it did not go, and the caller should fall back.
-    ///
-    /// **Opened at the app rather than at the scheme.** `NSWorkspace.open` on a
-    /// `linear://` url asks LaunchServices who claims the scheme, and the answer is
-    /// whatever registered last; naming the bundle means the link goes where the toggle
-    /// says it goes.
-    func hand(_ url: String) -> Bool {
-        guard let application = installedAt, let deep = deepLink(for: url) else { return false }
-        // The open is asynchronous and the caller may terminate the process as soon as this
-        // returns — a cold launch does exactly that — so it is waited on. The timeout is
-        // long enough for a cold app launch and short enough that a wedged one still lets
-        // the link through to a browser.
-        let done = DispatchSemaphore(value: 0)
-        var opened = true
-        NSWorkspace.shared.open([deep], withApplicationAt: application,
-                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
-            opened = error == nil
-            done.signal()
-        }
-        return done.wait(timeout: .now() + 10) == .timedOut ? true : opened
     }
 }

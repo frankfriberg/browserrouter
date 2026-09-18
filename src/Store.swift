@@ -1,12 +1,12 @@
 import Foundation
 
-/// Everything on disk: the rules, and which desktop apps get their own links.
-///
-/// The file holds both because they are read and written together — see ``Settings``.
+/// Everything on disk: the rules, in the order they are consulted, and where a link goes
+/// when none of them claims it.
 struct Settings {
+    /// **The order is the meaning.** First match wins, so this is a list and not a set, and
+    /// the file's line order is load-bearing — a hand-edit that moves a line changes where
+    /// links go.
     var rules: [Rule] = []
-    /// The desktop apps links are handed to, stored as `app<TAB>name` lines.
-    var apps: Set<Handoff> = []
     /// Where a url goes when no rule claims it, stored as a `default<TAB>target` line.
     ///
     /// **This has to be a setting now.** While Dia was the only browser, "no rule matched"
@@ -36,30 +36,38 @@ enum Store {
         .appendingPathComponent(".dia-router/rules.tsv")
 
     private static let header = """
-    # Which browser, and which profile inside it, a url opens in. Edited by BrowserRouter — open it from Spotlight.
+    # Which browser, and which profile inside it, a url opens in. Edited by BrowserRouter —
+    # open it from Spotlight.
     #
     # target<TAB>kind<TAB>pattern
     #
-    # An `app<TAB>name` line hands that site's links to its desktop app instead, before any
-    # rule below is looked at: app<TAB>linear, figma, notion, zoom, spotify.
+    # **The first rule that matches wins, so the order of these lines is what decides.**
+    # Move a line up to give it priority. New rules written in the app are inserted by how
+    # specific they are — narrow above broad — so a rule added later does not shadow one
+    # that was already there.
     #
-    # A `default<TAB>browser:profile` line is where a url goes when no rule claims it.
+    # A `default<TAB>target` line is where a url goes when no rule claims it.
     #
     # A target is a browser, optionally with a profile after a colon:
     #
     #   dia:Work    chrome:Personal    arc:Side project    safari    firefox:default
     #
-    # Browsers: dia, arc, chrome, brave, edge, vivaldi, safari, firefox. Safari has no way
-    # to be told which profile to use, so a profile written after it is ignored.
+    # Browsers: dia, arc, chrome, brave, edge, vivaldi, safari, firefox, zen. Safari has no
+    # way to be told which profile to use, so a profile written after it is ignored.
+    #
+    # Or an app, which skips the browser entirely:
+    #
+    #   app:linear    app:spotify    app:bear    app:things
+    #
+    # Any name works. linear, figma, notion, slack, teams, asana, discord, zoom and spotify
+    # are rewritten the way each app actually wants; anything else swaps the scheme for the
+    # name and keeps the path, which is what most apps expect. A link the app has no place
+    # for — zoom.us/pricing is a web page — falls through to the next rule that matches.
     #
     #   host      a domain and its subdomains             example.com
     #   prefix    a url starting with this                github.com/acme
     #   pathhas   a host, then a word in its path         linear.app:acme
     #   regex     a raw regular expression                ^https?://foo\\.com/(a|b)
-    #
-    # Specificity decides which rule wins, never the order of these lines: regex, then
-    # prefix, then pathhas, then host, and the longer pattern first within a kind. A rule
-    # for github.com/acme therefore beats one for github.com on its own.
     #
     # Saving in the app rewrites this file, so comments added below are not kept.
 
@@ -69,16 +77,27 @@ enum Store {
         adoptLegacyFile()
         guard let text = try? String(contentsOf: file, encoding: .utf8) else { return Settings() }
         var settings = Settings()
+        var legacyApps: [Rule] = []
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
             let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
-            // **An unknown app name is dropped, not kept.** A line written by hand for an
-            // app this build has never heard of cannot be honoured, and keeping it would
-            // mean writing it back out as something that still does nothing.
+            // **The old `app<TAB>linear` line, expanded into the rules it always meant.**
+            // A handoff used to be a checkbox consulted before the table, so to keep a file
+            // routing exactly as it did, its rules go to the *top* of the list — which is
+            // what "before any rule below is looked at" means once everything is a rule.
             if fields.first == "app" {
-                if fields.count >= 2, let app = Handoff(rawValue: fields[1]) { settings.apps.insert(app) }
+                // **Deduped, because the old format could not tell you it had duplicates.**
+                // Handoffs were a set, so a file listing `app figma` twice read as one
+                // checkbox and looked fine; expanded literally it becomes two identical
+                // rules, the second of which can never be reached.
+                if fields.count >= 2, let app = Handoff(rawValue: fields[1]) {
+                    for rule in app.suggestedRules
+                    where !legacyApps.contains(where: { $0.target == rule.target && $0.pattern == rule.pattern }) {
+                        legacyApps.append(rule)
+                    }
+                }
                 continue
             }
             // **A `default` line naming a browser this build does not know is left alone**,
@@ -96,6 +115,12 @@ enum Store {
             guard !pattern.isEmpty else { continue }
             settings.rules.append(Rule(target: target, kind: kind, pattern: pattern))
         }
+        // A file written before the list was ordered has no order worth keeping — it was
+        // sorted by specificity every time it was read — so it is seeded that way, with the
+        // old handoffs above it where they used to sit.
+        if !legacyApps.isEmpty {
+            settings.rules = legacyApps + Rule.sortedBySpecificity(settings.rules)
+        }
         return settings
     }
 
@@ -110,11 +135,11 @@ enum Store {
 
     @discardableResult
     static func save(_ settings: Settings) -> Bool {
-        // The app lines go first, because that is the order they are consulted in.
-        let apps = Handoff.allCases.filter { settings.apps.contains($0) }.map { "app\t\($0.rawValue)" }
+        // **Written in list order, never sorted.** Sorting here would quietly undo every
+        // drag the user made, and the order is the only place that intent is recorded.
         let fallback = ["default\t\(settings.fallback.token)"]
         let rules = settings.rules.map { "\($0.target.token)\t\($0.kind.rawValue)\t\($0.pattern)" }
-        let text = header + (apps + fallback + rules).joined(separator: "\n") + "\n"
+        let text = header + (fallback + rules).joined(separator: "\n") + "\n"
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try text.write(to: file, atomically: true, encoding: .utf8)
