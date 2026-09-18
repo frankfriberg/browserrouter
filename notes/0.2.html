@@ -1,0 +1,28 @@
+<h2>Rules are a list you order, and deep links are something you can read</h2>
+
+<p>The first rule that matches now wins, so the order of the list is what decides. New rules
+are placed narrowest first, so a broad one added later does not quietly shadow a narrow one
+that was already there — and the arrows under the table are how you overrule that when you
+want to.</p>
+
+<p><b>The nine app handoffs are ordinary rules now.</b> They used to be checkboxes, which
+said the list of apps was nine long. Each one is a line in the table you can read, move,
+edit or delete, and writing your own takes nothing special:</p>
+
+<pre>app:bear://{rest}    link    bear.app/{rest...}</pre>
+
+<p><b>Deep links are a pattern and a template.</b> <code>zoom.us/j/{id}</code> becomes
+<code>zoommtg://{host}/join?confno={id}</code>, written in the rules file rather than
+compiled into the app. The vocabulary is four things: <code>{name}</code> for one path
+segment, <code>{name...}</code> for the rest of the url, <code>{host}</code> for the host
+that matched, and <code>?key={name}</code> for a query parameter found wherever it actually
+appears. A pattern that does not match is an app declining the link, so
+<code>zoom.us/pricing</code> goes to a browser without anything being written to say so.</p>
+
+<ul>
+  <li>Rules can be edited, not only added and deleted.</li>
+  <li>Presets moved into the add button, next to “New rule…”.</li>
+  <li><code>BrowserRouter --save</code> rewrites the rules file in the current format.</li>
+  <li>The rules file documents the whole vocabulary, so anything that can write a line of
+      text can add a rule.</li>
+</ul>
