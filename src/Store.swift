@@ -35,39 +35,74 @@ enum Store {
     private static let legacyFile = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".dia-router/rules.tsv")
 
+    /// **Written for someone who has never seen this app, and for whatever is reading the
+    /// file on their behalf.** The whole vocabulary is here, with an example of each, so a
+    /// new rule can be written straight into the file without opening the window — which is
+    /// the point of it being a text file and not a plist.
     private static let header = """
-    # Which browser, and which profile inside it, a url opens in. Edited by BrowserRouter —
-    # open it from Spotlight.
+    # Which browser, profile, or app a url opens in. Edited by BrowserRouter — open it from
+    # Spotlight — or by hand, or by anything else that can write a line of text.
     #
-    # target<TAB>kind<TAB>pattern
+    #   target<TAB>kind<TAB>pattern
     #
-    # **The first rule that matches wins, so the order of these lines is what decides.**
-    # Move a line up to give it priority. New rules written in the app are inserted by how
-    # specific they are — narrow above broad — so a rule added later does not shadow one
-    # that was already there.
+    # THE FIRST RULE THAT MATCHES WINS, so the order of these lines is what decides. Move a
+    # line up to give it priority. Rules added in the app are inserted narrowest first, so a
+    # broad rule added later does not shadow one that was already there.
     #
     # A `default<TAB>target` line is where a url goes when no rule claims it.
     #
-    # A target is a browser, optionally with a profile after a colon:
     #
-    #   dia:Work    chrome:Personal    arc:Side project    safari    firefox:default
+    # TARGETS
+    #
+    #   dia:Work                 a browser, and a profile inside it
+    #   chrome:Personal          the profile is that browser's own name for it
+    #   safari                   no profile: wherever the browser would have put it
+    #   app:bear                 an app, by url scheme: keeps the path, swaps the scheme
+    #   app:zoommtg://{host}/join?confno={id}      an app, by rewrite — see below
     #
     # Browsers: dia, arc, chrome, brave, edge, vivaldi, safari, firefox, zen. Safari has no
     # way to be told which profile to use, so a profile written after it is ignored.
     #
-    # Or an app, which skips the browser entirely:
     #
-    #   app:linear    app:spotify    app:bear    app:things
+    # KINDS
     #
-    # Any name works. linear, figma, notion, slack, teams, asana, discord, zoom and spotify
-    # are rewritten the way each app actually wants; anything else swaps the scheme for the
-    # name and keeps the path, which is what most apps expect. A link the app has no place
-    # for — zoom.us/pricing is a web page — falls through to the next rule that matches.
-    #
+    #   link      a url with {placeholders}               zoom.us/j/{id}
     #   host      a domain and its subdomains             example.com
     #   prefix    a url starting with this                github.com/acme
     #   pathhas   a host, then a word in its path         linear.app:acme
     #   regex     a raw regular expression                ^https?://foo\\.com/(a|b)
+    #
+    #
+    # REWRITES — how a web url becomes an app url
+    #
+    # A `link` pattern names the parts you want to keep, and the target puts them back:
+    #
+    #   app:zoommtg://{host}/join?confno={id}<TAB>link<TAB>zoom.us/j/{id}
+    #
+    #   turns  https://zoom.us/j/999  into  zoommtg://zoom.us/join?confno=999
+    #
+    # The vocabulary is four things:
+    #
+    #   {name}         one path segment
+    #   {name...}      the rest of the url, slashes and all
+    #   {host}         the host that matched — always available, never declared
+    #   ?key={name}    a query parameter, found wherever it actually appears
+    #
+    # Everything else in a pattern is literal. The scheme is assumed to be http or https,
+    # and the host matches its own subdomains, so `zoom.us` also matches `us02web.zoom.us`.
+    #
+    # A pattern that does not match is an app declining the link, and the url carries on
+    # down the list: `zoom.us/pricing` is a web page, matches no rule above, and opens in a
+    # browser. That is how an app takes only the links it can actually open.
+    #
+    # More examples, all of them real:
+    #
+    #   app:linear://{rest}<TAB>link<TAB>linear.app/{rest...}
+    #   app:spotify:{type}:{id}<TAB>link<TAB>spotify.com/{type}/{id}
+    #   app:slack://channel?team={team}&id={channel}<TAB>link<TAB>app.slack.com/client/{team}/{channel}
+    #
+    # Any app with a url scheme works. Nothing below is built in — these lines are the whole
+    # of it, and yours sit beside them on equal terms.
     #
     # Saving in the app rewrites this file, so comments added below are not kept.
 

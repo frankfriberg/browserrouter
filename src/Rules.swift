@@ -59,24 +59,6 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// The web hosts it takes links for, each matched like a `host` rule: the domain and
-    /// its subdomains, so `www.figma.com` and `open.spotify.com` need one entry between
-    /// them. **A list, because a share link and a canonical link are not always on the
-    /// same domain** — `discord.gg` is the one people paste and `discord.com` is the one
-    /// it redirects to.
-    var hosts: [String] {
-        switch self {
-        case .linear: return ["linear.app"]
-        case .figma: return ["figma.com"]
-        case .notion: return ["notion.so"]
-        case .slack: return ["slack.com"]
-        case .teams: return ["teams.microsoft.com"]
-        case .asana: return ["asana.com"]
-        case .discord: return ["discord.com", "discord.gg"]
-        case .zoom: return ["zoom.us"]
-        case .spotify: return ["spotify.com"]
-        }
-    }
 
     /// What the toggle says it will do, in the one line there is room for.
     var blurb: String {
@@ -93,98 +75,79 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// **The rules this preset adds, which are ordinary rules and nothing else.** They used
-    /// to be a checkbox, and a checkbox says the list of apps is the whole world; a rule in
-    /// the table says "this is the shape, write another one". `app:things host
-    /// culturedcode.com` is a sentence anyone can copy once they have seen this.
+    /// **The rules this preset adds — and they are the whole of what it knows.** There is
+    /// no rewrite in Swift any more: a pattern and a template say it, and say it somewhere
+    /// the user can read, copy and correct.
+    ///
+    /// `$1` is the first capture. That is why these are regex rules and not `host` ones:
+    /// the capture is how a piece of the web url reaches the app url, and nothing simpler
+    /// can carry it.
+    ///
+    /// **A pattern that does not match is an app that declines**, which is the whole of
+    /// the old "this link has no place in the app" logic. `zoom.us/pricing` is not a
+    /// meeting, does not match, and falls through to whatever rule is next — for free,
+    /// rather than through a special case.
+    ///
+    /// Every pair below reproduces the rewrite that was measured against the app itself.
     var suggestedRules: [Rule] {
-        hosts.map { Rule(target: .app(rawValue), kind: .host, pattern: $0) }
+        rewrites.map { Rule(target: .app($0.template), kind: .link, pattern: $0.pattern) }
     }
 
-    /// The deep link for a url on this host, or nil when the app has no place for it.
+    /// Ordered, because more than one can match and the narrower must be tried first — a
+    /// Zoom link with a passcode has to beat the one without, or the passcode is dropped,
+    /// and Spotify's locale segment has to be recognised before the form without it.
     ///
-    /// **Nil is a real answer, not a failure.** `zoom.us/pricing` is a web page and always
-    /// was; handing it to the Zoom app would open a meeting joiner onto nothing. Returning
-    /// nil sends it back down the ordinary browser path.
-    ///
-    /// The percent-encoded components are the ones read, not `path` and `query`: those are
-    /// decoded, and re-encoding a Figma file name by hand is how a link acquires a stray
-    /// space.
-    func deepLink(for url: String) -> URL? {
-        guard let parts = URLComponents(string: url), let host = parts.host else { return nil }
-        let path = parts.percentEncodedPath
-        var tail = path
-        if let q = parts.percentEncodedQuery { tail += "?" + q }
-        if let f = parts.percentEncodedFragment { tail += "#" + f }
-        // Every shape below wants the path without its leading slash; the scheme supplies
-        // the separator itself.
-        let rest = tail.hasPrefix("/") ? String(tail.dropFirst()) : tail
-        let segments = path.split(separator: "/").map(String.init)
-
+    /// Each pair reproduces a rewrite that was measured against the app itself, and each
+    /// is written in the same vocabulary anyone else would use — see
+    /// ``Rule/compileLink(_:)``.
+    var rewrites: [(pattern: String, template: String)] {
         switch self {
-        case .linear, .figma:
-            // A plain scheme swap: the web host carries no meaning the app needs.
-            guard !rest.isEmpty else { return nil }
-            return URL(string: "\(rawValue)://\(rest)")
+        case .linear:
+            return [("linear.app/{rest...}", "linear://{rest}")]
+        case .figma:
+            return [("figma.com/{rest...}", "figma://{rest}")]
         case .notion:
             // **Notion keeps the host.** `notion://page` opens the app onto nothing; it is
             // `notion://www.notion.so/page` that resolves.
-            guard !rest.isEmpty else { return nil }
-            return URL(string: "notion://\(host)/\(rest)")
+            return [("notion.so/{rest...}", "notion://{host}/{rest}")]
         case .slack:
-            // **Only the `app.slack.com/client/...` form converts**, because it is the
-            // only one carrying the workspace *id*. A `<name>.slack.com/archives/...`
-            // link names the workspace the way a human does, and the app wants `T0…`;
-            // there is nothing here to turn one into the other, so it goes to a browser
-            // and Slack's own page does the handoff.
-            guard host.lowercased() == "app.slack.com",
-                  segments.count >= 2, segments[0].lowercased() == "client",
-                  segments[1].hasPrefix("T") || segments[1].hasPrefix("E")
-            else { return nil }
-            let team = segments[1]
-            guard segments.count >= 3 else { return URL(string: "slack://open?team=\(team)") }
-            return URL(string: "slack://channel?team=\(team)&id=\(segments[2])")
-        case .asana:
-            // **`asanadesktop:`, not `asana:`** — the mac app and the iOS app do not share
-            // a scheme, and the iOS one is the one everybody writes down. The path keeps
-            // its own leading slash under an empty host, exactly as the app's own
-            // `/-/desktop_app_link` page produces it.
-            guard host.lowercased() == "app.asana.com", !rest.isEmpty else { return nil }
-            return URL(string: "asanadesktop:///app/\(rest)")
-        case .discord:
-            // Discord keeps the host, like Notion. A `discord.gg` link is the short form
-            // of an invite and redirects to `discord.com/invite/<code>`, so it is rewritten
-            // to what it would have become rather than handed over as-is.
-            if host.lowercased().hasSuffix("discord.gg") {
-                guard let code = segments.first else { return nil }
-                return URL(string: "discord://discord.com/invite/\(code)")
-            }
-            guard !rest.isEmpty else { return nil }
-            return URL(string: "discord://\(host)/\(rest)")
+            // **Only the `app.slack.com/client/...` form converts**, because it is the only
+            // one carrying the workspace *id*. A `<name>.slack.com/archives/...` link names
+            // the workspace the way a human does and the app wants `T0…`; nothing here can
+            // turn one into the other, so it goes to a browser and Slack's page hands off.
+            // The channel form first: without a trailing anchor the shorter pattern would
+            // match a channel url too and drop the channel.
+            return [("app.slack.com/client/{team}/{channel}", "slack://channel?team={team}&id={channel}"),
+                    ("app.slack.com/client/{team}", "slack://open?team={team}")]
         case .teams:
-            // Teams' own deep links are the web path under `msteams:`, with one slash:
-            // `msteams:/l/meetup-join/...`. Only `/l/...` is one of them; the rest of
-            // teams.microsoft.com is the web client and belongs in a browser.
-            guard segments.first == "l" else { return nil }
-            return URL(string: "msteams:/\(rest)")
+            // Only `/l/...` is a deep link; the rest of teams.microsoft.com is the web
+            // client and belongs in a browser. One slash after the scheme, not two.
+            return [("teams.microsoft.com/l/{rest...}", "msteams:/l/{rest}")]
+        case .asana:
+            // **`asanadesktop:`, not `asana:`** — the mac app and the iOS app do not share a
+            // scheme, and the iOS one is the one everybody writes down. Three slashes: the
+            // path keeps its own under an empty host, as Asana's own desktop_app_link page
+            // produces it.
+            return [("app.asana.com/{rest...}", "asanadesktop:///app/{rest}")]
+        case .discord:
+            // A `discord.gg` link is the short form of an invite and redirects to
+            // `discord.com/invite/<code>`, so it is rewritten to what it would have become.
+            return [("discord.gg/{code}", "discord://discord.com/invite/{code}"),
+                    ("discord.com/{rest...}", "discord://{host}/{rest}")]
         case .zoom:
-            // Only a join link converts. `/j/<id>` and `/w/<id>` are meetings; a passcode
-            // rides along in `pwd` and is the difference between joining and being asked
-            // for it again.
-            guard segments.count >= 2, ["j", "w", "s"].contains(segments[0].lowercased()) else { return nil }
-            var deep = "zoommtg://\(host)/join?confno=\(segments[1])"
-            if let pwd = parts.queryItems?.first(where: { $0.name == "pwd" })?.value,
-               let encoded = pwd.addingPercentEncoding(withAllowedCharacters: .alphanumerics) {
-                deep += "&pwd=" + encoded
-            }
-            return URL(string: deep)
+            // A passcode rides along in `pwd` and is the difference between joining and
+            // being asked for it again, so that form is tried first. `/w/` and `/s/` are
+            // the webinar and personal-link forms of the same thing.
+            return [("zoom.us/j/{id}?pwd={pwd}", "zoommtg://{host}/join?confno={id}&pwd={pwd}"),
+                    ("zoom.us/j/{id}", "zoommtg://{host}/join?confno={id}"),
+                    ("zoom.us/w/{id}", "zoommtg://{host}/join?confno={id}"),
+                    ("zoom.us/s/{id}", "zoommtg://{host}/join?confno={id}")]
         case .spotify:
-            // Spotify's own uri is colon-separated, not a path: `spotify:track:<id>`. A
-            // locale segment (`/intl-de/track/<id>`) is web-only and is dropped.
-            var parts = segments
-            if let first = parts.first, first.hasPrefix("intl-") { parts.removeFirst() }
-            guard parts.count >= 2 else { return nil }
-            return URL(string: "spotify:" + parts.prefix(2).joined(separator: ":"))
+            // Spotify's own uri is colon-separated, not a path. A locale segment is
+            // web-only and is dropped, and has to be looked for first or it would be read
+            // as the type.
+            return [("spotify.com/intl-{locale}/{type}/{id}", "spotify:{type}:{id}"),
+                    ("spotify.com/{type}/{id}", "spotify:{type}:{id}")]
         }
     }
 }
@@ -250,7 +213,12 @@ enum Target: Hashable {
     var label: String {
         switch self {
         case .browser(let b, let p): return p.map { "\(b.label) — \($0)" } ?? b.label
-        case .app(let name): return (Handoff(rawValue: name)?.label ?? name.capitalized) + " app"
+        // **A template is shown as itself.** It is the answer to "where does this go",
+        // written in the only language that says it exactly, and hiding it behind a pretty
+        // name would undo the reason for having it in the file.
+        case .app(let spec):
+            if isTemplate { return spec }
+            return (Handoff(rawValue: spec)?.label ?? spec) + " app"
         }
     }
 
@@ -275,24 +243,14 @@ enum Target: Hashable {
         self = .browser(browser, tail)
     }
 
-    /// The url to hand the app, or nil when this app has no place for it.
-    ///
-    /// **Nil is a real answer, not a failure.** `zoom.us/pricing` is a web page and always
-    /// was; handing it to the Zoom app would open a meeting joiner onto nothing. Returning
-    /// nil is what sends the link back down the list to whatever rule matches next.
-    func deepLink(for url: String) -> URL? {
-        guard case .app(let name) = self else { return nil }
-        if let built = Handoff(rawValue: name) { return built.deepLink(for: url) }
-        // The plain rewrite: keep everything after the host, swap the scheme for the name.
-        // Deliberately the same shape as Linear's and Figma's, which is the one that turns
-        // out to be right whenever an app has not invented something of its own.
-        guard let parts = URLComponents(string: url) else { return nil }
-        var tail = parts.percentEncodedPath
-        if let q = parts.percentEncodedQuery { tail += "?" + q }
-        if let f = parts.percentEncodedFragment { tail += "#" + f }
-        let rest = tail.hasPrefix("/") ? String(tail.dropFirst()) : tail
-        guard !rest.isEmpty else { return nil }
-        return URL(string: "\(name)://\(rest)")
+    /// **A bare name means the plain rewrite**, kept because it is the common case and
+    /// nobody should need a regex to say "Bear opens Bear links": the scheme is swapped for
+    /// the name and the path is left alone. Anything with a colon or a slash in it is a
+    /// template instead, and templates are expanded in ``Rule/deepLink(for:)``, which is
+    /// where the captures are.
+    var isTemplate: Bool {
+        guard case .app(let spec) = self else { return false }
+        return spec.contains(":") || spec.contains("/")
     }
 }
 
@@ -300,7 +258,7 @@ enum Target: Hashable {
 /// specific first — see ``Rule/sortedBySpecificity(_:)``, which is now only where a rule is
 /// *placed*, not which one wins.
 enum Kind: String, CaseIterable, Identifiable, Hashable {
-    case regex, prefix, pathhas, host
+    case regex, link, prefix, pathhas, host
     var id: String { rawValue }
 
     var blurb: String {
@@ -308,6 +266,7 @@ enum Kind: String, CaseIterable, Identifiable, Hashable {
         case .host: return "a domain and its subdomains"
         case .prefix: return "a url starting with this"
         case .pathhas: return "a host, then a word anywhere in its path"
+        case .link: return "a url with {placeholders} the target reuses"
         case .regex: return "a raw regular expression"
         }
     }
@@ -317,6 +276,7 @@ enum Kind: String, CaseIterable, Identifiable, Hashable {
         case .host: return "example.com"
         case .prefix: return "github.com/acme"
         case .pathhas: return "linear.app:acme"
+        case .link: return "zoom.us/j/{id}"
         case .regex: return #"^https?://example\.com/(a|b)"#
         }
     }
@@ -333,7 +293,90 @@ struct Rule: Identifiable, Hashable {
     /// **A pattern is a literal for every kind but `regex`.** Unescaped, a host rule for
     /// `example.com` also matches `exampleXcom`, which is the kind of bug nobody sees
     /// because the wrong answer is still a plausible one.
+    /// **`{id}` compiled into a capture, and nothing more clever than that.** The nine
+    /// presets used to be Swift nobody could read or correct; written as
+    /// `zoom.us/j/{id}` → `zoommtg://{host}/join?confno={id}` they are two strings in a
+    /// file, and the shape is obvious enough to copy for an app nobody has heard of.
+    ///
+    /// The vocabulary is deliberately four things:
+    ///
+    /// - `{name}` — one path segment.
+    /// - `{name...}` — the rest of the url, slashes and all.
+    /// - `{host}` — the host that matched, always available and never declared, because
+    ///   several apps want their own domain back in the deep link.
+    /// - `?key={name}` — a query parameter, matched wherever it actually appears rather
+    ///   than where it was written, since nothing controls the order of a query string.
+    ///
+    /// Everything else in the pattern is a literal, escaped. There is no way to write
+    /// something surprising, which is the point: ``Kind/regex`` is still there for the day
+    /// this is not enough.
+    static func compileLink(_ pattern: String) -> (regex: NSRegularExpression, names: [String])? {
+        var body = pattern
+        // A scheme is allowed but ignored; people write one out of habit and it would only
+        // ever be http or https here.
+        if let range = body.range(of: "://") { body = String(body[range.upperBound...]) }
+        guard !body.isEmpty else { return nil }
+
+        // The query is matched by lookahead so that ?a=1&b=2 and ?b=2&a=1 behave the same.
+        let queryStart = body.firstIndex(of: "?")
+        let pathPart = queryStart.map { String(body[body.startIndex..<$0]) } ?? body
+        let queryPart = queryStart.map { String(body[body.index(after: $0)...]) } ?? ""
+
+        let slash = pathPart.firstIndex(of: "/")
+        let host = slash.map { String(pathPart[pathPart.startIndex..<$0]) } ?? pathPart
+        let path = slash.map { String(pathPart[$0...]) } ?? ""
+        guard !host.isEmpty, !host.contains("{") else { return nil }
+
+        var names: [String] = []
+        // Group 1 is always the host, so a template can ask for it without the pattern
+        // having to name it.
+        var source = "^https?://((?:[a-z0-9_-]+\\.)*\(NSRegularExpression.escapedPattern(for: host)))"
+
+        func expand(_ text: String, into source: inout String) -> Bool {
+            var literal = ""
+            var rest = Substring(text)
+            while let open = rest.firstIndex(of: "{") {
+                literal += rest[rest.startIndex..<open]
+                guard let close = rest[open...].firstIndex(of: "}") else { return false }
+                var name = String(rest[rest.index(after: open)..<close])
+                let greedy = name.hasSuffix("...")
+                if greedy { name = String(name.dropLast(3)) }
+                guard !name.isEmpty, name != "host", !names.contains(name) else { return false }
+                source += NSRegularExpression.escapedPattern(for: literal)
+                literal = ""
+                names.append(name)
+                source += greedy ? "(.*)" : "([^/?#]+)"
+                rest = rest[rest.index(after: close)...]
+            }
+            literal += rest
+            source += NSRegularExpression.escapedPattern(for: literal)
+            return true
+        }
+
+        guard expand(path, into: &source) else { return nil }
+
+        for pair in queryPart.split(separator: "&") {
+            let halves = pair.split(separator: "=", maxSplits: 1)
+            guard halves.count == 2 else { return nil }
+            let key = NSRegularExpression.escapedPattern(for: String(halves[0]))
+            let value = String(halves[1])
+            if value.hasPrefix("{"), value.hasSuffix("}") {
+                let name = String(value.dropFirst().dropLast())
+                guard !name.isEmpty, name != "host", !names.contains(name) else { return nil }
+                names.append(name)
+                source += "(?=[?&]\(key)=([^&]*))"
+            } else {
+                source += "(?=[?&]\(key)=\(NSRegularExpression.escapedPattern(for: value))([&]|$))"
+                names.append("")
+            }
+        }
+        guard let regex = try? NSRegularExpression(pattern: source, options: [.caseInsensitive])
+        else { return nil }
+        return (regex, names)
+    }
+
     var expression: NSRegularExpression? {
+        if kind == .link { return Rule.compileLink(pattern)?.regex }
         let source: String
         switch kind {
         case .host:
@@ -348,6 +391,8 @@ struct Rule: Identifiable, Hashable {
             source = "^https?://(www\\.)?\(Self.quote(host))/[^?#]*\(Self.quote(needle))"
         case .regex:
             source = pattern
+        case .link:
+            return nil // handled above
         }
         return try? NSRegularExpression(pattern: source, options: [.caseInsensitive])
     }
@@ -358,11 +403,62 @@ struct Rule: Identifiable, Hashable {
         return expression.firstMatch(in: url, options: [], range: range) != nil
     }
 
+    /// The url to hand the app, or nil when this rule cannot produce one.
+    ///
+    /// **Nil is a real answer, not a failure**, and with templates it is mostly free: a
+    /// pattern that does not match cannot rewrite, so `zoom.us/pricing` declines by simply
+    /// not being a meeting url. The link carries on down the list.
+    ///
+    /// **The rewrite is done on the raw url string, not on parsed components.** That is
+    /// what keeps `%3A` a `%3A`: re-encoding a path that was already encoded is how a link
+    /// acquires a stray space, and there is nothing here that decodes it in the first
+    /// place.
+    func deepLink(for url: String) -> URL? {
+        guard case .app(let spec) = target else { return nil }
+        guard let expression else { return nil }
+        let range = NSRange(url.startIndex..<url.endIndex, in: url)
+        guard let match = expression.firstMatch(in: url, options: [], range: range) else { return nil }
+        if kind == .link {
+            guard let compiled = Rule.compileLink(pattern) else { return nil }
+            func group(_ i: Int) -> String {
+                let r = match.range(at: i)
+                guard r.location != NSNotFound, let rr = Range(r, in: url) else { return "" }
+                return String(url[rr])
+            }
+            var out = spec.replacingOccurrences(of: "{host}", with: group(1))
+            for (i, name) in compiled.names.enumerated() where !name.isEmpty {
+                out = out.replacingOccurrences(of: "{\(name)}", with: group(i + 2))
+            }
+            // A placeholder the pattern never bound would be left sitting in the url as
+            // literal braces, which resolves to nothing. Refused instead.
+            guard !out.contains("{") else { return nil }
+            return URL(string: out)
+        }
+        if target.isTemplate {
+            let rewritten = expression.replacementString(for: match, in: url, offset: 0, template: spec)
+            return URL(string: rewritten)
+        }
+        // The plain rewrite: everything after the host, under the app's own scheme.
+        guard let parts = URLComponents(string: url) else { return nil }
+        var tail = parts.percentEncodedPath
+        if let q = parts.percentEncodedQuery { tail += "?" + q }
+        if let f = parts.percentEncodedFragment { tail += "#" + f }
+        let rest = tail.hasPrefix("/") ? String(tail.dropFirst()) : tail
+        guard !rest.isEmpty else { return nil }
+        return URL(string: "\(spec)://\(rest)")
+    }
+
     /// Why this rule can never match, or nil when it can. Shown where a rule is written,
     /// so a pattern that cannot fire is refused rather than stored and puzzled over later.
     var defect: String? {
         if pattern.trimmingCharacters(in: .whitespaces).isEmpty { return "A rule needs a pattern." }
         if pattern.contains("\t") { return "A pattern cannot contain a tab." }
+        // **$1 can only come from a capture, and only a regex rule has any.** Under any
+        // other kind the template would expand to an empty string and the link would open
+        // somewhere that is not quite anywhere, which is worse than being refused.
+        if target.isTemplate, case .app(let spec) = target, spec.contains("$"), kind != .regex {
+            return "A rewrite using $1 needs a regex rule, because that is where the captures come from."
+        }
         switch kind {
         case .pathhas:
             guard let colon = pattern.firstIndex(of: ":"),
@@ -385,7 +481,7 @@ struct Rule: Identifiable, Hashable {
     /// decides where a new rule is *inserted*, which is a suggestion the user can drag
     /// away from.
     var specificity: (Int, Int) {
-        let rank: [Kind: Int] = [.regex: 0, .prefix: 1, .pathhas: 2, .host: 3]
+        let rank: [Kind: Int] = [.regex: 0, .link: 1, .prefix: 2, .pathhas: 3, .host: 4]
         return (rank[kind] ?? 9, -pattern.count)
     }
 
@@ -437,7 +533,7 @@ struct Decision {
 /// rather than the link being handed somewhere it cannot open.
 func decide(_ url: String, against rules: [Rule], fallback: Target = .dia) -> Decision {
     for (index, rule) in rules.enumerated() where rule.matches(url) {
-        if case .app = rule.target, rule.target.deepLink(for: url) == nil { continue }
+        if case .app = rule.target, rule.deepLink(for: url) == nil { continue }
         return Decision(verdict: .target(rule.target), rule: rule, position: index + 1)
     }
     return Decision(verdict: .target(fallback), rule: nil, position: nil)

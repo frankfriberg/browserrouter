@@ -171,7 +171,7 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
             let name = d.target.token
             // The deep link is the part worth seeing: it is the thing that either resolves
             // in the app or does not.
-            if let deep = d.target.deepLink(for: u) {
+            if let deep = d.rule?.deepLink(for: u) {
                 print("\(name)\t\(d.reason)\t\(deep.absoluteString)")
             } else {
                 print("\(name)\t\(d.reason)\t\(u)")

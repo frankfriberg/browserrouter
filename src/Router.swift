@@ -31,7 +31,7 @@ enum Router {
             let target = decision.target
 
             if case .app = target {
-                if hand(url, to: target) { return .handedOff }
+                if let rule = decision.rule, hand(url, by: rule) { return .handedOff }
                 guard let failed = decision.rule,
                       let index = rules.firstIndex(where: { $0.id == failed.id })
                 else { break }
@@ -68,18 +68,19 @@ enum Router {
     /// it is only possible for the apps whose identifiers are written down. For a name
     /// someone typed, LaunchServices' own answer is the only answer there is — and it is
     /// the right one, since the user picked the scheme precisely because an app claims it.
-    private static func hand(_ url: String, to target: Target) -> Bool {
-        guard let deep = target.deepLink(for: url) else { return false }
-        if let built = target.handoff {
-            guard let application = built.installedAt else { return false }
-            return openWaiting([deep], at: application)
-        }
+    private static func hand(_ url: String, by rule: Rule) -> Bool {
+        guard let deep = rule.deepLink(for: url) else { return false }
+        // **Asked whether anything claims the scheme before opening it.** `NSWorkspace.open`
+        // on an unclaimed scheme fails quietly, and a link that goes nowhere is the one
+        // outcome this app must never produce; a no means the rule is skipped and the
+        // search carries on down the list.
         guard NSWorkspace.shared.urlForApplication(toOpen: deep) != nil else { return false }
         return NSWorkspace.shared.open(deep)
     }
 
     private static func route(_ url: String, to target: Target) -> Outcome {
-        if case .app = target { return hand(url, to: target) ? .handedOff : .failed }
+        // An app target only ever arrives here from the fallback, which cannot be one.
+        if case .app = target { return .failed }
         guard let browser = target.browser, let app = browser.installedAt else { return .failed }
         switch browser.mechanism {
         case .dia:

@@ -137,8 +137,6 @@ struct RulesWindow: View {
             // six visible rows, which is fewer rules than a real setup has.
             table.layoutPriority(1)
             Divider()
-            presets
-            Divider()
             fallbackRow
             Divider()
             tester
@@ -175,6 +173,20 @@ struct RulesWindow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// **One size for every control in the row.** A symbol's own bounds are its glyph's,
+    /// so a chevron and a minus produce buttons of different heights unless the label is
+    /// given a frame; this is that frame, in one place.
+    private var toolbarIcon: (width: CGFloat, height: CGFloat) { (13, 11) }
+
+    private func toolbarButton(_ symbol: String, _ help: String, enabled: Bool,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).frame(width: toolbarIcon.width, height: toolbarIcon.height)
+        }
+        .disabled(!enabled)
+        .help(help)
+    }
+
     private var table: some View {
         VStack(spacing: 0) {
             Table(model.rules, selection: $selection) {
@@ -189,10 +201,13 @@ struct RulesWindow: View {
                 TableColumn("Opens in") { rule in
                     HStack(spacing: 6) {
                         Circle().fill(rule.target.tint).frame(width: 8, height: 8)
-                        Text(rule.target.label).help(rule.target.token)
+                        Text(rule.target.label)
+                            .font(rule.target.isTemplate
+                                  ? .system(.body, design: .monospaced) : .body)
+                            .help(rule.target.token)
                     }
                 }
-                .width(min: 150, ideal: 190)
+                .width(min: 180, ideal: 250)
                 TableColumn("Match") { rule in
                     Text(rule.kind.rawValue).foregroundStyle(.secondary)
                 }
@@ -209,17 +224,38 @@ struct RulesWindow: View {
             .modifier(AlternatingRows())
 
             HStack(spacing: 8) {
-                Button { sheet = .add } label: { Image(systemName: "plus") }
-                    .help("Add a rule")
-                Button { model.remove(selection); selection = [] } label: { Image(systemName: "minus") }
-                    .disabled(selection.isEmpty)
-                    .help("Delete the selected rules")
-                Button { model.move(selection, by: -1) } label: { Image(systemName: "chevron.up") }
-                    .disabled(!model.canMove(selection, by: -1))
-                    .help("Move up, so this rule is tried sooner")
-                Button { model.move(selection, by: 1) } label: { Image(systemName: "chevron.down") }
-                    .disabled(!model.canMove(selection, by: 1))
-                    .help("Move down, so this rule is tried later")
+                // **The presets live in here now**, rather than in a row of checkboxes
+                // under the table. They were never a separate kind of thing — each one
+                // adds ordinary rules to the list above — and a menu on the add button is
+                // where you already are when you want one.
+                Menu {
+                    Button("New rule…") { sheet = .add }
+                    Divider()
+                    Menu("Skip the browser") {
+                        ForEach(Handoff.allCases) { app in
+                            Button(app.label) { model.addPreset(app) }
+                                .disabled(model.has(app) || app.installedAt == nil)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "plus").frame(width: toolbarIcon.width, height: toolbarIcon.height)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Add a rule, or one of the presets")
+
+                toolbarButton("minus", "Delete the selected rules", enabled: !selection.isEmpty) {
+                    model.remove(selection); selection = []
+                }
+                toolbarButton("chevron.up", "Move up, so this rule is tried sooner",
+                              enabled: model.canMove(selection, by: -1)) {
+                    model.move(selection, by: -1)
+                }
+                toolbarButton("chevron.down", "Move down, so this rule is tried later",
+                              enabled: model.canMove(selection, by: 1)) {
+                    model.move(selection, by: 1)
+                }
                 Spacer()
                 // The way back to the panel once it has had its one chance, for the day
                 // another browser takes the default back.
@@ -232,30 +268,6 @@ struct RulesWindow: View {
             }
             .padding(10)
         }
-    }
-
-    /// **Presets, not toggles, and the difference is the whole point.** A checkbox says
-    /// the nine apps below are the list; a button that writes `app:linear  host
-    /// linear.app` into the table above says "this is the shape" — and the next thought is
-    /// `app:things  host  culturedcode.com`, which works without anyone adding a case.
-    ///
-    /// An app that is not installed is shown anyway, greyed, so the row reads the same on
-    /// every Mac and adding one after installing it is where you would already be looking.
-    private var presets: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Skip the browser").font(.callout.weight(.medium))
-            Text("Add a rule that sends these links straight to the app. They are ordinary rules — edit them, move them, or write your own for any app with a url scheme.")
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 152), alignment: .leading)],
-                      alignment: .leading, spacing: 6) {
-                ForEach(Handoff.allCases) { app in
-                    PresetChip(app: app, added: model.has(app)) { model.addPreset(app) }
-                }
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// **Where everything else goes, named rather than implied.** The moment this app
@@ -296,35 +308,6 @@ struct RulesWindow: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// One preset. Reads as a button before it is used and as a statement of fact after, so
-/// clicking it twice is obviously pointless rather than quietly harmless.
-private struct PresetChip: View {
-    let app: Handoff
-    let added: Bool
-    let add: () -> Void
-
-    // Read once when the row is built rather than on every redraw: it is a LaunchServices
-    // lookup, and the answer does not change while a window is open.
-    @State private var installed: Bool?
-
-    var body: some View {
-        Button(action: add) {
-            HStack(spacing: 5) {
-                Image(systemName: added ? "checkmark.circle.fill" : "plus.circle")
-                    .foregroundStyle(added ? Color.green : Color.accentColor)
-                Text(app.label)
-                if installed == false {
-                    Text("not installed").font(.caption).foregroundStyle(.tertiary)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(installed == false || added)
-        .help(added ? "Already in the rules above" : app.blurb)
-        .onAppear { if installed == nil { installed = app.installedAt != nil } }
     }
 }
 
