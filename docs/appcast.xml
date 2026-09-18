@@ -4,13 +4,12 @@
         <title>BrowserRouter</title>
         <item>
             <title>0.1</title>
-            <pubDate>Fri, 18 Sep 2026 10:48:17 +0200</pubDate>
+            <pubDate>Fri, 18 Sep 2026 11:06:47 +0200</pubDate>
             <link>https://github.com/frankfriberg/browserrouter</link>
-            <sparkle:version>8</sparkle:version>
+            <sparkle:version>10</sparkle:version>
             <sparkle:shortVersionString>0.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/frankfriberg/browserrouter/releases/download/v0.1/BrowserRouter-0.1.zip" length="1446382" type="application/octet-stream" sparkle:edSignature="56SSVaqSPrcOwlwT6JSR+J1hx+b9rIqppS+x4/ENQar4wlXq9MZZuddsev3Kq8VGGNDX+kcDbNDxNnFO/lwaAA=="/>
             <description><![CDATA[<h2>First release</h2>
 <p>Sends each link to the right browser, and the right profile inside it.</p>
 <ul>
@@ -20,6 +19,7 @@
   <li>Links for Linear, Figma, Notion, Slack, Teams, Asana, Discord, Zoom and Spotify can skip the browser entirely.</li>
 </ul>
 ]]></description>
+            <enclosure url="https://github.com/frankfriberg/browserrouter/releases/download/v0.1/BrowserRouter-0.1.zip" length="1484712" type="application/octet-stream" sparkle:edSignature="SvyduLEGVc50FV+YYHkf/3rZoRayDd8+DoLIWoaBRZPZGvjv+Oqk//TuBo/Pyn6KrXNPd/24WJGY5mqU1GxwBw=="/>
         </item>
     </channel>
 </rss>
