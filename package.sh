@@ -133,11 +133,33 @@ ditto -c -k --keepParent "$STAGE/BrowserRouter.app" "$ZIP"
 # **The download url is a GitHub release asset, not a Pages file.** Only the appcast is
 # small enough to belong in git; the zip is uploaded to the tag and the feed points at it.
 if [ -x "$ROOT/vendor/bin/generate_appcast" ]; then
+  # **No deltas.** They work, and they would save about 100KB on a 1.4MB download — at the
+  # price of another asset per release that has to be uploaded to the right tag and stays
+  # wrong silently if it is not.
   "$ROOT/vendor/bin/generate_appcast" \
     --embed-release-notes \
+    --maximum-deltas 0 \
     --download-url-prefix "https://github.com/frankfriberg/browserrouter/releases/download/v$VERSION/" \
     --link "https://github.com/frankfriberg/browserrouter" \
     "$RELEASE"
+
+  # **Every enclosure gets the prefix of the release being cut, including the old ones.**
+  # generate_appcast regenerates the whole feed from the directory, so last version's item
+  # comes back pointing at this version's tag — a url that has never existed. Each archive
+  # carries its version in its name, so each one is sent back to its own tag.
+  python3 - "$RELEASE/appcast.xml" <<'FIX'
+import re, sys
+path = sys.argv[1]
+xml = open(path).read()
+def retag(m):
+    return "/releases/download/v%s/BrowserRouter-%s.zip" % (m.group(1), m.group(1))
+xml = re.sub(r"/releases/download/v[^/\"]+/BrowserRouter-([0-9][^/\"]*)\.zip", retag, xml)
+# A feed seeded from a build that still made deltas keeps advertising them; the files are
+# gone, and an enclosure nobody uploads is a download that fails.
+xml = re.sub(r"\s*<sparkle:deltas>.*?</sparkle:deltas>", "", xml, flags=re.S)
+open(path, "w").write(xml)
+FIX
+
   mkdir -p "$ROOT/docs"
   cp "$RELEASE/appcast.xml" "$ROOT/docs/appcast.xml"
   echo "appcast written to docs/appcast.xml — commit it to publish the update"
