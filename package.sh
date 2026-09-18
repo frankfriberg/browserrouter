@@ -53,6 +53,21 @@ browsers it routes to: Dia, Arc, Chrome, Brave, Edge, Vivaldi, Safari, Firefox o
    so links go to whichever Safari profile is in front.
 TXT
 
+# **The app is notarized before the dmg is, and stapled inside it.** Two artifacts leave
+# this machine now — the dmg someone installs from, and the zip Sparkle downloads — and a
+# ticket stapled to the dmg does nothing for the app once it is out of it. Stapling the
+# bundle first means both carry it, at the cost of one extra submission.
+if [ "${BROWSERROUTER_SIGN_ID:--}" != "-" ] && [ -n "$BROWSERROUTER_NOTARY_PROFILE" ]; then
+  APPZIP="$OUT/notarize.zip"
+  rm -f "$APPZIP"
+  # `ditto -k --keepParent` is the only zip that preserves a bundle's symlinks and
+  # extended attributes; `zip -r` produces an archive the notary service rejects.
+  ditto -c -k --keepParent "$STAGE/BrowserRouter.app" "$APPZIP"
+  xcrun notarytool submit "$APPZIP" --keychain-profile "$BROWSERROUTER_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$STAGE/BrowserRouter.app"
+  rm -f "$APPZIP"
+fi
+
 # **The volume icon has to go on while the image is writable**, so the dmg is built
 # read-write, decorated, and only then compressed. It is the icon that survives being
 # mailed, because it lives inside the image rather than beside it.
@@ -90,6 +105,44 @@ else
   echo "ad-hoc signed: Gatekeeper will refuse this on any other Mac — set BROWSERROUTER_SIGN_ID and BROWSERROUTER_NOTARY_PROFILE to share it" >&2
 fi
 
+# **The zip is the update artifact, and the dmg is the install one.** Sparkle unpacks a zip
+# in place; a dmg would have to be mounted, and mounting is what puts a second bundle with
+# this identifier into LaunchServices — the failure this file already works around twice.
+RELEASE="$OUT/release"
+mkdir -p "$RELEASE"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$STAGE/BrowserRouter.app/Contents/Info.plist")"
+ZIP="$RELEASE/BrowserRouter-$VERSION.zip"
+rm -f "$ZIP"
+ditto -c -k --keepParent "$STAGE/BrowserRouter.app" "$ZIP"
+
+# **The published feed is seeded back in before it is regenerated.** `build/` is not in
+# git, so the release directory is empty on any machine but the one that cut the last
+# release; without this the feed would be rewritten with a single item every time. That
+# matters beyond tidiness: each item carries its own `minimumSystemVersion`, so the day
+# this app drops macOS 12, a Mac still on 12 needs the older entry to be offered the last
+# build that runs there rather than nothing at all.
+[ -f "$ROOT/docs/appcast.xml" ] && cp "$ROOT/docs/appcast.xml" "$RELEASE/appcast.xml"
+
+# Release notes live in the repo and are copied in named after the archive, which is where
+# generate_appcast looks for them. Written as html because that is what the update window
+# renders; without one the update shows a version number and nothing else.
+[ -f "$ROOT/notes/$VERSION.html" ] && cp "$ROOT/notes/$VERSION.html" "$RELEASE/BrowserRouter-$VERSION.html"
+
+# **The download url is a GitHub release asset, not a Pages file.** Only the appcast is
+# small enough to belong in git; the zip is uploaded to the tag and the feed points at it.
+if [ -x "$ROOT/vendor/bin/generate_appcast" ]; then
+  "$ROOT/vendor/bin/generate_appcast" \
+    --embed-release-notes \
+    --download-url-prefix "https://github.com/frankfriberg/browserrouter/releases/download/v$VERSION/" \
+    --link "https://github.com/frankfriberg/browserrouter" \
+    "$RELEASE"
+  mkdir -p "$ROOT/docs"
+  cp "$RELEASE/appcast.xml" "$ROOT/docs/appcast.xml"
+  echo "appcast written to docs/appcast.xml — commit it to publish the update"
+else
+  echo "no vendor/bin/generate_appcast: run build.sh once to fetch Sparkle" >&2
+fi
+
 # The icon on the .dmg *file*, which is a different thing from the volume icon above:
 # it lives in an extended attribute, so Finder shows it here and most transfers strip it.
 # Set last, because stapling rewrites the file.
@@ -112,3 +165,4 @@ rm -f "$SETICON"
 "$LS" -u "$STAGE/BrowserRouter.app" 2>/dev/null || true
 
 echo "built $DMG"
+echo "built $ZIP"

@@ -28,6 +28,22 @@ enum Setup {
 
     static var isComplete: Bool { isDefaultBrowser && isLoginAgentInstalled }
 
+    /// **Set by Sparkle on its way out and read once on the way back in.** It is the only
+    /// thing that survives between the process being replaced and the new one starting, so
+    /// it is where "you were resident before the update" has to live.
+    static var relaunchingForUpdate: Bool {
+        get { UserDefaults.standard.bool(forKey: "relaunchingForUpdate") }
+        set { UserDefaults.standard.set(newValue, forKey: "relaunchingForUpdate") }
+    }
+
+    /// Read it and clear it, so a crash on the next launch cannot leave the app resident
+    /// for ever with no way to open its own window.
+    static func consumeRelaunchFlag() -> Bool {
+        guard relaunchingForUpdate else { return false }
+        relaunchingForUpdate = false
+        return true
+    }
+
     /// Whether the first-open panel has already had its chance. Only this is remembered:
     /// declining is a decision, and re-asking at every launch would make it a nag.
     static var hasBeenOffered: Bool {

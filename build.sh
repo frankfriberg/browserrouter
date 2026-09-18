@@ -33,9 +33,38 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # for the default browser at all.
 DEPLOYMENT_TARGET=12.0
 
+# **Sparkle is fetched, not committed.** It is a 3MB signed binary that would otherwise sit
+# in the history for ever, and the one thing that matters about it — that this is the build
+# Sparkle published and not something that arrived in its place — is a checksum, not a
+# copy. Cached, so an ordinary rebuild is offline.
+SPARKLE_VERSION=2.10.0
+SPARKLE_SHA=c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
+VENDOR="$ROOT/vendor"
+SPARKLE="$VENDOR/Sparkle.framework"
+if [ ! -d "$SPARKLE" ]; then
+  mkdir -p "$VENDOR"
+  TAR="$VENDOR/Sparkle-$SPARKLE_VERSION.tar.xz"
+  curl -sL -o "$TAR" \
+    "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+  echo "$SPARKLE_SHA  $TAR" | shasum -a 256 -c - >/dev/null || {
+    echo "Sparkle-$SPARKLE_VERSION.tar.xz is not the archive this build expects" >&2
+    rm -f "$TAR"; exit 1; }
+  tar -xJf "$TAR" -C "$VENDOR" Sparkle.framework bin
+  rm -f "$TAR"
+fi
+
+# The version is the tag, and the build number is the number of commits — **monotonic
+# without anyone maintaining it**, which is the only property Sparkle needs to decide that
+# one build is newer than another.
+SHORT_VERSION="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
+[ -n "$SHORT_VERSION" ] || SHORT_VERSION=0.1
+BUILD_VERSION="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
+
 swiftc -swift-version 5 -O -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
+  -F "$VENDOR" -framework Sparkle \
+  -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   "$ROOT/src/Browsers.swift" "$ROOT/src/Rules.swift" "$ROOT/src/Store.swift" "$ROOT/src/Router.swift" \
-  "$ROOT/src/Setup.swift" "$ROOT/src/UI.swift" "$ROOT/src/main.swift" \
+  "$ROOT/src/Setup.swift" "$ROOT/src/Updater.swift" "$ROOT/src/UI.swift" "$ROOT/src/main.swift" \
   -o "$APP/Contents/MacOS/BrowserRouter"
 
 # The icon is drawn by src's sibling tool rather than stored as a blob, so a change to it
@@ -47,6 +76,13 @@ if [ ! -f "$ROOT/icon/AppIcon.icns" ] || [ "$ROOT/icon/MakeIcon.swift" -nt "$ROO
   iconutil -c icns "$ROOT/icon/BrowserRouter.iconset" -o "$ROOT/icon/AppIcon.icns"
 fi
 cp "$ROOT/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+
+mkdir -p "$APP/Contents/Frameworks"
+cp -R "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
+# **The XPC services are for sandboxed apps, and this one is not.** Shipping them means two
+# more bundles to sign, notarize and keep valid, to do a job the framework does in-process
+# when there is no sandbox to get around.
+rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices"
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
@@ -63,12 +99,21 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>BrowserRouter</string>
   <key>CFBundleDisplayName</key><string>BrowserRouter</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>SHORTVERSION</string>
+  <key>CFBundleVersion</key><string>BUILDVERSION</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSMinimumSystemVersion</key><string>MINOS</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <!-- Sparkle. The feed is a static file on this repo's Pages branch; the key is what makes
+       a download from it trustworthy, and it is checked before anything is unpacked. -->
+  <key>SUFeedURL</key><string>https://frankfriberg.github.io/browserrouter/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>63CTK+9wYMzAOlQoTunsSsOTRfv/UE4zXzH9/3knHwM=</string>
+  <!-- **Answered here rather than asked on first launch.** Sparkle otherwise opens with a
+       "check automatically?" prompt, and an agent app has nowhere to show one — it would
+       arrive behind whatever the user is looking at, on a launch they did not perform. -->
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
   <!-- **The only thing that keeps the Dock icon from flashing on every link.** Delivering
        a url promotes the handler to a foreground app, and the promotion lands after the
        handler returns, so demoting from inside the app can only ever undo a blink that has
@@ -115,6 +160,8 @@ PLIST
 # binary was actually compiled for. Done here because it is an edit to a file that is about
 # to be signed, and an edit after signing is a broken signature.
 sed -i '' "s|<string>MINOS</string>|<string>$DEPLOYMENT_TARGET</string>|" "$APP/Contents/Info.plist"
+sed -i '' "s|<string>SHORTVERSION</string>|<string>$SHORT_VERSION</string>|" "$APP/Contents/Info.plist"
+sed -i '' "s|<string>BUILDVERSION</string>|<string>$BUILD_VERSION</string>|" "$APP/Contents/Info.plist"
 
 # The hardened runtime and a secure timestamp are what notarization requires, and both
 # are meaningless for an ad-hoc signature, so they go on only with a real identity.
@@ -135,9 +182,27 @@ else
 </dict>
 </plist>
 ENTS
-  codesign --force --deep --options runtime --timestamp \
+  # **Signed inner-out, one bundle at a time.** `--deep` is not enough for a nested
+  # framework that has to be notarized: it re-signs what it finds with the *outer* bundle's
+  # options, and Sparkle's helpers are executables in their own right that each need the
+  # hardened runtime and a timestamp of their own. Notarization rejects the lot otherwise,
+  # and says so about a path inside the framework rather than about the app.
+  SPARKLE_IN_APP="$APP/Contents/Frameworks/Sparkle.framework"
+  for nested in \
+    "$SPARKLE_IN_APP/Versions/B/Updater.app" \
+    "$SPARKLE_IN_APP/Versions/B/Autoupdate" \
+    "$SPARKLE_IN_APP"; do
+    codesign --force --options runtime --timestamp -s "$SIGN_ID" "$nested"
+  done
+  # The app last, and **without `--deep`**, so nothing above is re-signed with the app's
+  # entitlements. The Apple-events entitlement belongs to the app; an updater that carries
+  # it is an updater asking for something it never uses.
+  codesign --force --options runtime --timestamp \
     --entitlements "$ENT" -s "$SIGN_ID" "$APP"
   rm -f "$ENT"
+  # Read back, because a nested bundle that failed to sign is a notarization rejection
+  # twenty minutes later rather than an error here.
+  codesign --verify --deep --strict "$APP"
 fi
 [ -n "$STAGED" ] || "$LS" -f "$APP"
 

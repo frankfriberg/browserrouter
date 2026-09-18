@@ -18,6 +18,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let resident: Bool
     private var handledURL = false
     private var window: NSWindow?
+    /// **Made once the app is running, not in `init`.** Starting the updater schedules a
+    /// network check, and a `--explain` run that never reaches `NSApplication` has no
+    /// business making one.
+    private var updater: Updater?
 
     init(resident: Bool) {
         self.resident = resident
@@ -37,6 +41,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        updater = Updater(promote: { [weak self] in self?.promoteForUpdate() },
+                          demote: { [weak self] in self?.demoteAfterUpdate() })
         // **A resident launch shows nothing.** It is started by launchd at login, and a
         // rules window appearing then would be the one thing nobody asked for.
         guard !resident else { return }
@@ -66,6 +72,24 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         !resident
     }
 
+    /// **The app becomes an ordinary app for the length of an update session.** Sparkle's
+    /// window is a real window and an accessory app cannot put one in front of anyone; the
+    /// menu comes with it, because the update alert is a window like the editor's and ⌘Q
+    /// has to keep working while it is up.
+    private func promoteForUpdate() {
+        NSApp.setActivationPolicy(.regular)
+        installMenu()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// **Only if there is nothing else on screen.** The update can be asked for from the
+    /// rules window's own menu, and demoting while that window is open would take its Dock
+    /// icon away underneath it.
+    private func demoteAfterUpdate() {
+        guard window == nil else { return }
+        if resident { NSApp.setActivationPolicy(.accessory) }
+    }
+
     /// Back to an accessory when the window goes, so the Dock icon does not outlive the
     /// editor it belonged to.
     func windowWillClose(_ notification: Notification) {
@@ -81,6 +105,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func installMenu() {
         guard NSApp.mainMenu == nil else { return }
         let app = NSMenu()
+        // Sparkle's own action, on the updater rather than the responder chain, since an
+        // accessory app's chain does not reach it.
+        let check = NSMenuItem(title: "Check for Updates…",
+                               action: #selector(Updater.checkForUpdates(_:)), keyEquivalent: "")
+        check.target = updater
+        app.addItem(check)
+        app.addItem(.separator())
         app.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(.separator())
         app.addItem(withTitle: "Quit BrowserRouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -122,7 +153,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
+// **A relaunch after an update is a resident launch.** Sparkle restarts the bundle with no
+// arguments, and without this the app it restarts is a different app from the one it
+// replaced: a rules window instead of a silent router. Read once and cleared.
 let resident = arguments.contains("--resident")
+    || (!arguments.contains { $0.hasPrefix("--") } && Setup.consumeRelaunchFlag())
 
 // `--resident` is not a command that prints and exits, so it is taken out before the flag
 // below decides this is a CLI invocation.
