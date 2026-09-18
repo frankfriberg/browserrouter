@@ -6,6 +6,10 @@ import Foundation
 /// System Settings otherwise, which is why they are asked for on first open rather than
 /// left in a readme nobody reads twice.
 enum Setup {
+    /// **Still the old name, and deliberately.** The label and the bundle identifier are
+    /// what the default-browser binding and every Automation grant are attached to; a
+    /// tidier string would cost a trip through System Settings and one prompt per browser,
+    /// and nobody ever sees either of them.
     static let agentLabel = "com.frankfriberg.diarouter"
     static var agentPlist: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -79,7 +83,7 @@ enum Setup {
             return Refusal(message: error.localizedDescription, needsSystemSettings: false)
         }
         return Refusal(
-            message: "macOS would not let DiaRouter take the default on its own. Pick DiaRouter under \u{201C}Default web browser\u{201D} in System Settings instead.",
+            message: "macOS would not let BrowserRouter take the default on its own. Pick BrowserRouter under \u{201C}Default web browser\u{201D} in System Settings instead.",
             needsSystemSettings: true)
     }
 

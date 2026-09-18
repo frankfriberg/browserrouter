@@ -6,8 +6,8 @@ import SwiftUI
 // path that showed a window on url delivery would put a window in front of every link.
 //
 // Also a CLI, so the routing can be checked from a shell without clicking anything:
-//   DiaRouter --explain <url>...   the verdict and the deciding rule
-//   DiaRouter --route <url>        route it for real, no window
+//   BrowserRouter --explain <url>...   the verdict and the deciding rule
+//   BrowserRouter --route <url>        route it for real, no window
 
 final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// **Resident: launched at login to wait for links, rather than launched by one.**
@@ -26,8 +26,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         handledURL = true
-        let rules = Store.load()
-        for url in urls { Router.open(url.absoluteString, rules: rules) }
+        let settings = Store.load()
+        for url in urls {
+            Router.open(url.absoluteString, settings)
+        }
         // **A cold launch quits when it is done; a resident one never does.** Either way an
         // open editor keeps it alive, so a link clicked while looking at the rules is
         // routed instead of killing the window mid-edit.
@@ -81,7 +83,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let app = NSMenu()
         app.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(.separator())
-        app.addItem(withTitle: "Quit DiaRouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        app.addItem(withTitle: "Quit BrowserRouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -109,7 +111,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         installMenu()
         let hosting = NSHostingController(rootView: RulesWindow())
         let window = NSWindow(contentViewController: hosting)
-        window.title = "DiaRouter"
+        window.title = "BrowserRouter"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.center()
         window.delegate = self
@@ -125,27 +127,40 @@ let resident = arguments.contains("--resident")
 // `--resident` is not a command that prints and exits, so it is taken out before the flag
 // below decides this is a CLI invocation.
 if let flag = arguments.first, flag.hasPrefix("--"), !resident {
-    let rules = Store.load()
+    let settings = Store.load()
     let urls = Array(arguments.dropFirst())
     switch flag {
     case "--explain":
         for u in urls {
-            let d = decide(u, against: rules)
+            let d = decide(u, against: settings.rules, handingOff: settings.apps,
+                           fallback: settings.fallback)
             let name: String
             switch d.verdict {
-            case .profile(let p): name = p.rawValue
-            case .native: name = "native"
+            case .app(let a): name = a.rawValue
+            case .target(let t): name = t.token
             }
-            print("\(name)\t\(d.reason)\t\(u)")
+            // The deep link is the part worth seeing: it is the thing that either resolves
+            // in the app or does not.
+            if case .app(let a) = d.verdict, let deep = a.deepLink(for: u) {
+                print("\(name)\t\(d.reason)\t\(deep.absoluteString)")
+            } else {
+                print("\(name)\t\(d.reason)\t\(u)")
+            }
         }
     case "--route":
-        for u in urls { print(Router.open(u, rules: rules).rawValue) }
+        for u in urls {
+            print(Router.open(u, settings).rawValue)
+        }
     case "--list":
-        for r in Rule.sortedBySpecificity(rules) {
-            print("\(r.profile.rawValue)\t\(r.kind.rawValue)\t\(r.pattern)")
+        for a in Handoff.allCases where settings.apps.contains(a) {
+            print("app\t\(a.rawValue)")
+        }
+        print("default\t\(settings.fallback.token)")
+        for r in Rule.sortedBySpecificity(settings.rules) {
+            print("\(r.target.token)\t\(r.kind.rawValue)\t\(r.pattern)")
         }
     default:
-        FileHandle.standardError.write(Data("usage: DiaRouter [--explain|--route|--list] <url>...\n".utf8))
+        FileHandle.standardError.write(Data("usage: BrowserRouter [--explain|--route|--list] <url>...\n".utf8))
         exit(2)
     }
     exit(0)

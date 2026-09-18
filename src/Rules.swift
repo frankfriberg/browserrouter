@@ -1,26 +1,244 @@
 import Foundation
 
-/// Which Dia profile a url opens in. **`native` is not a profile** — it means hand the url
-/// to Dia untouched, so it opens exactly where it would have with no router in the way.
+/// Where a url ends up. **`app` means it never reaches a browser at all**; everything
+/// else is a browser and, where the browser has them, a profile inside it.
+///
+/// There is no `native` case any more. Once this app is the system default browser there
+/// is no browser behind it to fall through to, so "nothing matched" is a ``Target`` like
+/// any other — the one in ``Settings/fallback`` — and it is chosen rather than implied.
 enum Verdict: Equatable {
-    case profile(Profile)
-    case native
+    case app(Handoff)
+    case target(Target)
 }
 
-enum Profile: String, CaseIterable, Identifiable, Hashable {
-    case work, personal
+/// A site whose links its own desktop app can open, and the deep link that gets them there.
+///
+/// **These are toggled, not written as rules**, because there is nothing to write: the host
+/// and the deep-link shape are properties of the app, not of anyone's setup. A toggle is
+/// also the honest control — the only question is whether you want that app or a browser.
+///
+/// **A handoff is decided before any rule is**, in ``decide(_:against:handingOff:)``. The
+/// rules table answers "which browser profile", and an app that isn't a browser cannot be
+/// ranked against it: routing a Linear link into the Linear app is the same answer whether
+/// the link is work or personal.
+///
+/// Adding one is adding a case. The deep link is measured against the app, never guessed —
+/// each shape below was checked against the scheme the app actually declares.
+enum Handoff: String, CaseIterable, Identifiable, Hashable {
+    case linear, figma, notion, slack, teams, asana, discord, zoom, spotify
+
     var id: String { rawValue }
 
-    /// The Dia profile's own name, which is the lookup key AppleScript uses.
-    ///
-    /// **Dia lets these be renamed and yours already disagree with themselves** — the
-    /// per-profile prefs call the work one "Work" while AppleScript reports "All Gravy".
-    /// AppleScript's name is the one that matters, because AppleScript is what places the tab.
-    var diaProfileName: String {
+    var label: String {
         switch self {
-        case .work: return "All Gravy"
-        case .personal: return "Personal"
+        case .linear: return "Linear"
+        case .figma: return "Figma"
+        case .notion: return "Notion"
+        case .slack: return "Slack"
+        case .teams: return "Microsoft Teams"
+        case .asana: return "Asana"
+        case .discord: return "Discord"
+        case .zoom: return "Zoom"
+        case .spotify: return "Spotify"
         }
+    }
+
+    /// **A list, because an app can ship under more than one identifier.** Teams did
+    /// exactly that: the rewritten app took a new one and left the old bundle installed
+    /// beside it. The first one present wins.
+    var bundleIDs: [String] {
+        switch self {
+        case .linear: return ["com.linear"]
+        case .figma: return ["com.figma.Desktop"]
+        case .notion: return ["notion.id"]
+        case .slack: return ["com.tinyspeck.slackmacgap"]
+        case .teams: return ["com.microsoft.teams2", "com.microsoft.teams"]
+        case .asana: return ["com.electron.asana"]
+        case .discord: return ["com.hnc.Discord", "com.hnc.DiscordPTB", "com.hnc.DiscordCanary"]
+        case .zoom: return ["us.zoom.xos"]
+        case .spotify: return ["com.spotify.client"]
+        }
+    }
+
+    /// The web hosts it takes links for, each matched like a `host` rule: the domain and
+    /// its subdomains, so `www.figma.com` and `open.spotify.com` need one entry between
+    /// them. **A list, because a share link and a canonical link are not always on the
+    /// same domain** — `discord.gg` is the one people paste and `discord.com` is the one
+    /// it redirects to.
+    var hosts: [String] {
+        switch self {
+        case .linear: return ["linear.app"]
+        case .figma: return ["figma.com"]
+        case .notion: return ["notion.so"]
+        case .slack: return ["slack.com"]
+        case .teams: return ["teams.microsoft.com"]
+        case .asana: return ["asana.com"]
+        case .discord: return ["discord.com", "discord.gg"]
+        case .zoom: return ["zoom.us"]
+        case .spotify: return ["spotify.com"]
+        }
+    }
+
+    /// What the toggle says it will do, in the one line there is room for.
+    var blurb: String {
+        switch self {
+        case .linear: return "Issues, projects and views open in the Linear app."
+        case .figma: return "Files and prototypes open in the Figma app."
+        case .notion: return "Pages and databases open in the Notion app."
+        case .slack: return "A channel or dm link opens in the Slack app."
+        case .teams: return "A meeting or chat link opens in the Teams app."
+        case .asana: return "Tasks, projects and portfolios open in the Asana app."
+        case .discord: return "Channels and invites open in the Discord app."
+        case .zoom: return "A meeting link joins in the Zoom app instead of the join page."
+        case .spotify: return "Tracks, albums and playlists open in the Spotify app."
+        }
+    }
+
+    private var expressions: [NSRegularExpression] {
+        hosts.compactMap {
+            try? NSRegularExpression(
+                pattern: "^https?://([a-z0-9_-]+\\.)*\(NSRegularExpression.escapedPattern(for: $0))([/?#:]|$)",
+                options: [.caseInsensitive])
+        }
+    }
+
+    func matches(_ url: String) -> Bool {
+        let range = NSRange(url.startIndex..<url.endIndex, in: url)
+        return expressions.contains { $0.firstMatch(in: url, options: [], range: range) != nil }
+    }
+
+    /// The deep link for a url on this host, or nil when the app has no place for it.
+    ///
+    /// **Nil is a real answer, not a failure.** `zoom.us/pricing` is a web page and always
+    /// was; handing it to the Zoom app would open a meeting joiner onto nothing. Returning
+    /// nil sends it back down the ordinary browser path.
+    ///
+    /// The percent-encoded components are the ones read, not `path` and `query`: those are
+    /// decoded, and re-encoding a Figma file name by hand is how a link acquires a stray
+    /// space.
+    func deepLink(for url: String) -> URL? {
+        guard let parts = URLComponents(string: url), let host = parts.host else { return nil }
+        let path = parts.percentEncodedPath
+        var tail = path
+        if let q = parts.percentEncodedQuery { tail += "?" + q }
+        if let f = parts.percentEncodedFragment { tail += "#" + f }
+        // Every shape below wants the path without its leading slash; the scheme supplies
+        // the separator itself.
+        let rest = tail.hasPrefix("/") ? String(tail.dropFirst()) : tail
+        let segments = path.split(separator: "/").map(String.init)
+
+        switch self {
+        case .linear, .figma:
+            // A plain scheme swap: the web host carries no meaning the app needs.
+            guard !rest.isEmpty else { return nil }
+            return URL(string: "\(rawValue)://\(rest)")
+        case .notion:
+            // **Notion keeps the host.** `notion://page` opens the app onto nothing; it is
+            // `notion://www.notion.so/page` that resolves.
+            guard !rest.isEmpty else { return nil }
+            return URL(string: "notion://\(host)/\(rest)")
+        case .slack:
+            // **Only the `app.slack.com/client/...` form converts**, because it is the
+            // only one carrying the workspace *id*. A `<name>.slack.com/archives/...`
+            // link names the workspace the way a human does, and the app wants `T0…`;
+            // there is nothing here to turn one into the other, so it goes to a browser
+            // and Slack's own page does the handoff.
+            guard host.lowercased() == "app.slack.com",
+                  segments.count >= 2, segments[0].lowercased() == "client",
+                  segments[1].hasPrefix("T") || segments[1].hasPrefix("E")
+            else { return nil }
+            let team = segments[1]
+            guard segments.count >= 3 else { return URL(string: "slack://open?team=\(team)") }
+            return URL(string: "slack://channel?team=\(team)&id=\(segments[2])")
+        case .asana:
+            // **`asanadesktop:`, not `asana:`** — the mac app and the iOS app do not share
+            // a scheme, and the iOS one is the one everybody writes down. The path keeps
+            // its own leading slash under an empty host, exactly as the app's own
+            // `/-/desktop_app_link` page produces it.
+            guard host.lowercased() == "app.asana.com", !rest.isEmpty else { return nil }
+            return URL(string: "asanadesktop:///app/\(rest)")
+        case .discord:
+            // Discord keeps the host, like Notion. A `discord.gg` link is the short form
+            // of an invite and redirects to `discord.com/invite/<code>`, so it is rewritten
+            // to what it would have become rather than handed over as-is.
+            if host.lowercased().hasSuffix("discord.gg") {
+                guard let code = segments.first else { return nil }
+                return URL(string: "discord://discord.com/invite/\(code)")
+            }
+            guard !rest.isEmpty else { return nil }
+            return URL(string: "discord://\(host)/\(rest)")
+        case .teams:
+            // Teams' own deep links are the web path under `msteams:`, with one slash:
+            // `msteams:/l/meetup-join/...`. Only `/l/...` is one of them; the rest of
+            // teams.microsoft.com is the web client and belongs in a browser.
+            guard segments.first == "l" else { return nil }
+            return URL(string: "msteams:/\(rest)")
+        case .zoom:
+            // Only a join link converts. `/j/<id>` and `/w/<id>` are meetings; a passcode
+            // rides along in `pwd` and is the difference between joining and being asked
+            // for it again.
+            guard segments.count >= 2, ["j", "w", "s"].contains(segments[0].lowercased()) else { return nil }
+            var deep = "zoommtg://\(host)/join?confno=\(segments[1])"
+            if let pwd = parts.queryItems?.first(where: { $0.name == "pwd" })?.value,
+               let encoded = pwd.addingPercentEncoding(withAllowedCharacters: .alphanumerics) {
+                deep += "&pwd=" + encoded
+            }
+            return URL(string: deep)
+        case .spotify:
+            // Spotify's own uri is colon-separated, not a path: `spotify:track:<id>`. A
+            // locale segment (`/intl-de/track/<id>`) is web-only and is dropped.
+            var parts = segments
+            if let first = parts.first, first.hasPrefix("intl-") { parts.removeFirst() }
+            guard parts.count >= 2 else { return nil }
+            return URL(string: "spotify:" + parts.prefix(2).joined(separator: ":"))
+        }
+    }
+}
+
+/// A browser, and optionally a profile inside it.
+///
+/// **The profile is a string, not a case.** Every browser here lets its profiles be
+/// renamed, and yours already disagree with themselves — Dia's per-profile prefs call the
+/// work one "Work" while AppleScript reports "All Gravy". The name the *routing* mechanism
+/// answers to is the one stored, because that is the one that places the tab.
+///
+/// A nil profile means "wherever this browser would have put it", which is the only thing
+/// Safari can be asked for and a perfectly ordinary thing to want from the others.
+struct Target: Hashable {
+    var browser: Browser
+    var profile: String?
+
+    init(_ browser: Browser, _ profile: String? = nil) {
+        self.browser = browser
+        // An empty string is a profile nobody can have, and it arrives from a text field
+        // that has been cleared. Stored as nil so it cannot be looked up and missed.
+        let trimmed = profile?.trimmingCharacters(in: .whitespaces)
+        self.profile = (trimmed?.isEmpty ?? true) ? nil : trimmed
+    }
+
+    static let dia = Target(.dia)
+
+    /// How the target is written in rules.tsv: `chrome`, or `chrome:allgravy.com`.
+    ///
+    /// **Split on the first colon only**, because a profile may contain one and a browser
+    /// name never does.
+    var token: String { profile.map { "\(browser.rawValue):\($0)" } ?? browser.rawValue }
+
+    /// The label the editor and the `--explain` output both use.
+    var label: String { profile.map { "\(browser.label) — \($0)" } ?? browser.label }
+
+    init?(token: String) {
+        // **The two names the file used to hold.** Rules written before there was more
+        // than one browser said `work` and `personal`, and those files are still on disk
+        // and still hand-edited; they are read as what they always meant.
+        switch token {
+        case "work": self.init(.dia, "All Gravy"); return
+        case "personal": self.init(.dia, "Personal"); return
+        default: break
+        }
+        let parts = token.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let browser = Browser(rawValue: String(parts[0]).lowercased()) else { return nil }
+        self.init(browser, parts.count > 1 ? String(parts[1]) : nil)
     }
 }
 
@@ -51,7 +269,7 @@ enum Kind: String, CaseIterable, Identifiable, Hashable {
 
 struct Rule: Identifiable, Hashable {
     var id = UUID()
-    var profile: Profile
+    var target: Target
     var kind: Kind
     var pattern: String
 
@@ -128,20 +346,27 @@ struct Decision {
 
     var summary: String {
         switch verdict {
-        case .profile(let p): return p.diaProfileName
-        case .native: return "Dia's own default profile, untouched"
+        case .app(let a): return "The \(a.label) app"
+        case .target(let t): return t.label
         }
     }
 
     var reason: String {
+        if case .app(let a) = verdict { return "\(a.rawValue) handoff" }
         guard let rule else { return "no rule matched" }
         return "\(rule.kind.rawValue) \(rule.pattern)"
     }
 }
 
-func decide(_ url: String, against rules: [Rule]) -> Decision {
-    for rule in Rule.sortedBySpecificity(rules) where rule.matches(url) {
-        return Decision(verdict: .profile(rule.profile), rule: rule)
+/// **Handoffs are asked first and rules are not consulted at all when one answers.** They
+/// are not more specific rules, they are a different question — see ``Handoff``.
+func decide(_ url: String, against rules: [Rule], handingOff apps: Set<Handoff> = [],
+            fallback: Target = .dia) -> Decision {
+    for app in Handoff.allCases where apps.contains(app) && app.matches(url) {
+        if app.deepLink(for: url) != nil { return Decision(verdict: .app(app), rule: nil) }
     }
-    return Decision(verdict: .native, rule: nil)
+    for rule in Rule.sortedBySpecificity(rules) where rule.matches(url) {
+        return Decision(verdict: .target(rule.target), rule: rule)
+    }
+    return Decision(verdict: .target(fallback), rule: nil)
 }
