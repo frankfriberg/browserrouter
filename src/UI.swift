@@ -47,6 +47,19 @@ final class Model: ObservableObject {
         }
     }
 
+    /// **Replaced where it sits, not re-inserted.** Position is the user's decision now,
+    /// and an edit is not a reason to overrule it — changing a rule's pattern must not
+    /// silently move it above or below the rules it was competing with.
+    func update(_ rule: Rule) {
+        guard let index = settings.rules.firstIndex(where: { $0.id == rule.id }) else { return }
+        settings.rules[index] = rule
+        Store.save(settings)
+    }
+
+    func rule(_ id: Rule.ID?) -> Rule? {
+        settings.rules.first { $0.id == id }
+    }
+
     func remove(_ ids: Set<Rule.ID>) {
         settings.rules.removeAll { ids.contains($0.id) }
         Store.save(settings)
@@ -120,9 +133,26 @@ struct RulesWindow: View {
     // only ever show one of them, and which one is not the one you asked for.
     @State private var sheet: Sheet?
 
-    private enum Sheet: String, Identifiable {
+    private enum Sheet: Identifiable {
         case welcome, add
-        var id: String { rawValue }
+        case edit(Rule)
+
+        var id: String {
+            switch self {
+            case .welcome: return "welcome"
+            case .add: return "add"
+            // The rule's own id, so opening the editor on a different row while one is
+            // already open replaces the sheet rather than being ignored as "same item".
+            case .edit(let rule): return "edit-\(rule.id)"
+            }
+        }
+    }
+
+    /// The one selected rule, or nil when none or several are. Editing is a single-row
+    /// operation: there is no sensible meaning to changing three patterns at once.
+    private var selected: Rule? {
+        guard selection.count == 1 else { return nil }
+        return model.rule(selection.first)
     }
 
     /// **No sort anywhere.** The list is what the user arranged, and reordering it for
@@ -149,6 +179,7 @@ struct RulesWindow: View {
             switch which {
             case .welcome: WelcomeSheet { Setup.hasBeenOffered = true; sheet = nil }
             case .add: RuleEditor { model.add($0) }
+            case .edit(let rule): RuleEditor(editing: rule) { model.update($0) }
             }
         }
         // **Offered once, and only while there is something to offer.** A window that opens
@@ -248,6 +279,9 @@ struct RulesWindow: View {
                 toolbarButton("minus", "Delete the selected rules", enabled: !selection.isEmpty) {
                     model.remove(selection); selection = []
                 }
+                toolbarButton("pencil", "Edit the selected rule", enabled: selected != nil) {
+                    if let rule = selected { sheet = .edit(rule) }
+                }
                 toolbarButton("chevron.up", "Move up, so this rule is tried sooner",
                               enabled: model.canMove(selection, by: -1)) {
                     model.move(selection, by: -1)
@@ -315,19 +349,35 @@ struct RulesWindow: View {
 /// field as it is typed, so nobody saves a half-written `pathhas` and wonders why nothing
 /// routes.
 struct RuleEditor: View {
-    let add: (Rule) -> Void
+    /// The rule being changed, or nil when one is being written. **The same sheet either
+    /// way**: the questions are identical, and a second editor that drifts from the first
+    /// is how a validation rule ends up applying to new rules and not to edited ones.
+    private let existing: Rule?
+    private let save: (Rule) -> Void
     @Environment(\.dismiss) private var dismiss
 
-    @State private var target = Target.dia
-    @State private var kind: Kind = .prefix
-    @State private var pattern = ""
+    @State private var target: Target
+    @State private var kind: Kind
+    @State private var pattern: String
 
-    private var candidate: Rule { Rule(target: target, kind: kind, pattern: pattern) }
+    init(editing: Rule? = nil, save: @escaping (Rule) -> Void) {
+        self.existing = editing
+        self.save = save
+        _target = State(initialValue: editing?.target ?? .dia)
+        _kind = State(initialValue: editing?.kind ?? .prefix)
+        _pattern = State(initialValue: editing?.pattern ?? "")
+    }
+
+    /// **The id is kept when editing**, because that is what the model replaces by — a new
+    /// id would append a second rule and leave the old one in place.
+    private var candidate: Rule {
+        Rule(id: existing?.id ?? UUID(), target: target, kind: kind, pattern: pattern)
+    }
     private var defect: String? { pattern.isEmpty ? nil : candidate.defect }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Add a rule").font(.title3.weight(.semibold))
+            Text(existing == nil ? "Add a rule" : "Edit rule").font(.title3.weight(.semibold))
 
             TargetPicker(label: "Opens in", target: $target)
 
@@ -351,7 +401,7 @@ struct RuleEditor: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Add") { add(candidate); dismiss() }
+                Button(existing == nil ? "Add" : "Save") { save(candidate); dismiss() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(pattern.isEmpty || candidate.defect != nil)
             }

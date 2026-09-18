@@ -181,6 +181,11 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
         for u in urls {
             print(Router.open(u, settings).rawValue)
         }
+    case "--save":
+        // **Reads the file and writes it straight back**, which is how a file still in an
+        // older format gets migrated without opening the window. Everything the reader
+        // understands is preserved; everything it does not was already being ignored.
+        print(Store.save(settings) ? "wrote \(Store.file.path)" : "could not write \(Store.file.path)")
     case "--list":
         print("default\t\(settings.fallback.token)")
         // In list order, because that is the order they are consulted in and the numbers
@@ -189,7 +194,7 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
             print("\(i + 1)\t\(r.target.token)\t\(r.kind.rawValue)\t\(r.pattern)")
         }
     default:
-        FileHandle.standardError.write(Data("usage: BrowserRouter [--explain|--route|--list] <url>...\n".utf8))
+        FileHandle.standardError.write(Data("usage: BrowserRouter [--explain|--route|--list|--save] <url>...\n".utf8))
         exit(2)
     }
     exit(0)
