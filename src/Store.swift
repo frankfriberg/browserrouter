@@ -47,19 +47,19 @@ enum Store {
     #
     # A target is a browser, optionally with a profile after a colon:
     #
-    #   dia:All Gravy    chrome:allgravy.com    arc:Work    safari    firefox:default
+    #   dia:Work    chrome:Personal    arc:Side project    safari    firefox:default
     #
     # Browsers: dia, arc, chrome, brave, edge, vivaldi, safari, firefox. Safari has no way
     # to be told which profile to use, so a profile written after it is ignored.
     #
-    #   host      a domain and its subdomains             allgravy.com
-    #   prefix    a url starting with this                github.com/buttersolutions
-    #   pathhas   a host, then a word in its path         linear.app:all-gravy
+    #   host      a domain and its subdomains             example.com
+    #   prefix    a url starting with this                github.com/acme
+    #   pathhas   a host, then a word in its path         linear.app:acme
     #   regex     a raw regular expression                ^https?://foo\\.com/(a|b)
     #
     # Specificity decides which rule wins, never the order of these lines: regex, then
     # prefix, then pathhas, then host, and the longer pattern first within a kind. A rule
-    # for github.com/buttersolutions therefore beats one for github.com on its own.
+    # for github.com/acme therefore beats one for github.com on its own.
     #
     # Saving in the app rewrites this file, so comments added below are not kept.
 

@@ -218,7 +218,7 @@ struct Target: Hashable {
 
     static let dia = Target(.dia)
 
-    /// How the target is written in rules.tsv: `chrome`, or `chrome:allgravy.com`.
+    /// How the target is written in rules.tsv: `chrome`, or `chrome:Work`.
     ///
     /// **Split on the first colon only**, because a profile may contain one and a browser
     /// name never does.
@@ -259,9 +259,9 @@ enum Kind: String, CaseIterable, Identifiable, Hashable {
 
     var example: String {
         switch self {
-        case .host: return "allgravy.com"
-        case .prefix: return "github.com/buttersolutions"
-        case .pathhas: return "linear.app:all-gravy"
+        case .host: return "example.com"
+        case .prefix: return "github.com/acme"
+        case .pathhas: return "linear.app:acme"
         case .regex: return #"^https?://example\.com/(a|b)"#
         }
     }
@@ -276,7 +276,7 @@ struct Rule: Identifiable, Hashable {
     /// The regex this rule matches with, or nil for a `regex` rule that does not compile.
     ///
     /// **A pattern is a literal for every kind but `regex`.** Unescaped, a host rule for
-    /// `allgravy.com` also matches `allgravyXcom`, which is the kind of bug nobody sees
+    /// `example.com` also matches `exampleXcom`, which is the kind of bug nobody sees
     /// because the wrong answer is still a plausible one.
     var expression: NSRegularExpression? {
         let source: String
@@ -313,7 +313,7 @@ struct Rule: Identifiable, Hashable {
             guard let colon = pattern.firstIndex(of: ":"),
                   !pattern[pattern.startIndex..<colon].isEmpty,
                   !pattern[pattern.index(after: colon)...].isEmpty
-            else { return "A pathhas pattern is a host and a word joined by a colon, as in linear.app:all-gravy." }
+            else { return "A pathhas pattern is a host and a word joined by a colon, as in linear.app:acme." }
             return nil
         case .regex:
             return expression == nil ? "That is not a valid regular expression." : nil
@@ -327,8 +327,8 @@ struct Rule: Identifiable, Hashable {
     }
 
     /// **Specificity decides which rule wins, never the order rules are stored in.** A
-    /// `prefix github.com/buttersolutions` beats a `host github.com` on its own, so adding a
-    /// broad rule cannot shadow a narrow one that someone forgot to keep above it.
+    /// `prefix github.com/acme` beats a `host github.com` on its own, so adding a broad
+    /// rule cannot shadow a narrow one that someone forgot to keep above it.
     static func sortedBySpecificity(_ rules: [Rule]) -> [Rule] {
         let rank: [Kind: Int] = [.regex: 0, .prefix: 1, .pathhas: 2, .host: 3]
         return rules.sorted {

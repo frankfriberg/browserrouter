@@ -182,7 +182,7 @@ enum Browser: String, CaseIterable, Identifiable, Hashable {
 ///
 /// **The name on screen and the name on disk are different strings**, and the flag wants
 /// the one on disk. `--profile-directory` takes `Profile 4`; the profile picker calls that
-/// same profile `allgravy.com`. Nobody would write `Profile 4` in a rule, so the mapping is
+/// same profile `Work`. Nobody would write `Profile 4` in a rule, so the mapping is
 /// read from `Local State` and the rule stores the readable one.
 enum ChromiumProfiles {
     struct Entry { let directory: String; let name: String }

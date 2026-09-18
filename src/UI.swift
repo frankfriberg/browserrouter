@@ -99,7 +99,7 @@ struct RulesWindow: View {
             tester
         }
         // **Sized for the longest pattern, not for the shortest.** At 560 the pattern
-        // column truncates `github.com/buttersolutions`, which is the one column whose
+        // column truncates `github.com/acme-solutions`, which is the one column whose
         // whole job is to be read exactly.
         .frame(minWidth: 680, idealWidth: 720, minHeight: 720, idealHeight: 820)
         .sheet(item: $sheet) { which in

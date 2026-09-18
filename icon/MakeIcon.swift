@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 // The app icon, drawn rather than stored: a stem that forks, one arm per profile.
 // **The fork is the whole idea** — one link arriving, two places it can land — and the arm
-// colours are the two profiles, pink for All Gravy and grey for Personal, so the icon says
+// colours are the two profiles, pink for work and grey for personal, so the icon says
 // what the app does at any size.
 //
 // Kept deliberately blunt: 80/1024 strokes and no fine detail, because the 16 pt rendering
