@@ -3,6 +3,37 @@
     <channel>
         <title>BrowserRouter</title>
         <item>
+            <title>0.3</title>
+            <pubDate>Mon, 21 Sep 2026 11:31:18 +0200</pubDate>
+            <link>https://github.com/frankfriberg/browserrouter</link>
+            <sparkle:version>18</sparkle:version>
+            <sparkle:shortVersionString>0.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h2>Click the same link twice and it opens in a browser</h2>
+
+<p>A rule that sends a link to an app is a standing guess about where that link belongs, and
+until now the only way past a wrong guess was opening the editor. The second click is the
+moment you can say <i>not that one</i>: click the same link again within four seconds and
+every app rule is skipped, so it falls through to whichever browser would otherwise have
+had it.</p>
+
+<p>Nothing else changes. The rules are untouched, the app rule is still there for the next
+link, and the same click delivered twice — which macOS does now and then — is not read as a
+correction.</p>
+
+<ul>
+  <li>The checkbox is under “Everything else” in the rules window, and it is on by default:
+      it costs nothing until a link is deliberately clicked twice.</li>
+  <li>In the rules file it is a <code>secondclick&#9;browser</code> line, and
+      <code>secondclick&#9;off</code> turns it off.</li>
+  <li><code>BrowserRouter --route</code> ignores it, so a script routing the same url in a
+      loop still answers the same way every time.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/frankfriberg/browserrouter/releases/download/v0.3/BrowserRouter-0.3.zip" length="1510144" type="application/octet-stream" sparkle:edSignature="86ZSjFWQa6nTdTjYlPb7P2EYyKqtRiJKrjdllEls5q8YrLL3M1HrAZFZz6dBCjOAH8LUUzujTjJfcymsANT+CQ=="/>
+        </item>
+        <item>
             <title>0.2</title>
             <pubDate>Fri, 18 Sep 2026 13:15:37 +0200</pubDate>
             <link>https://github.com/frankfriberg/browserrouter</link>
