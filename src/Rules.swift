@@ -24,7 +24,7 @@ enum Verdict: Equatable {
 /// Adding one is adding a case. The deep link is measured against the app, never guessed —
 /// each shape below was checked against the scheme the app actually declares.
 enum Handoff: String, CaseIterable, Identifiable, Hashable {
-    case linear, figma, notion, slack, teams, asana, discord, zoom, spotify
+    case linear, figma, notion, slack, teams, asana, discord, zoom, spotify, prwatch
 
     var id: String { rawValue }
 
@@ -39,6 +39,7 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
         case .discord: return "Discord"
         case .zoom: return "Zoom"
         case .spotify: return "Spotify"
+        case .prwatch: return "PRWatch"
         }
     }
 
@@ -56,6 +57,7 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
         case .discord: return ["com.hnc.Discord", "com.hnc.DiscordPTB", "com.hnc.DiscordCanary"]
         case .zoom: return ["us.zoom.xos"]
         case .spotify: return ["com.spotify.client"]
+        case .prwatch: return ["com.allgravy.PRWatch"]
         }
     }
 
@@ -72,6 +74,7 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
         case .discord: return "Channels and invites open in the Discord app."
         case .zoom: return "A meeting link joins in the Zoom app instead of the join page."
         case .spotify: return "Tracks, albums and playlists open in the Spotify app."
+        case .prwatch: return "A GitHub pull request opens in PRWatch, not on github.com."
         }
     }
 
@@ -148,6 +151,13 @@ enum Handoff: String, CaseIterable, Identifiable, Hashable {
             // as the type.
             return [("spotify.com/intl-{locale}/{type}/{id}", "spotify:{type}:{id}"),
                     ("spotify.com/{type}/{id}", "spotify:{type}:{id}")]
+        case .prwatch:
+            // Pull requests only. The rest of github.com is a website, and an issue, a file
+            // or a repository has nothing in PRWatch to open. The tab form first: a link
+            // copied from the Files tab ends `/pull/42/files`, and without this it would be
+            // read as no pull request at all and go to the browser.
+            return [("github.com/{owner}/{repo}/pull/{number}/{tab...}", "prwatch://{owner}/{repo}/{number}"),
+                    ("github.com/{owner}/{repo}/pull/{number}", "prwatch://{owner}/{repo}/{number}")]
         }
     }
 }
@@ -189,6 +199,13 @@ enum Target: Hashable {
     var profile: String? {
         if case .browser(_, let p) = self { return p }
         return nil
+    }
+
+    /// Whether this points at an app rather than a browser. **The second click reads
+    /// this**: dropping every app rule is what turns a repeat click into a web page.
+    var isApp: Bool {
+        if case .app = self { return true }
+        return false
     }
 
     /// The built-in this name refers to, or nil for one written by hand. **Nil is not a

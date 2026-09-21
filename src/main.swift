@@ -179,7 +179,7 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
         }
     case "--route":
         for u in urls {
-            print(Router.open(u, settings).rawValue)
+            print(Router.open(u, settings, secondChance: false).rawValue)
         }
     case "--save":
         // **Reads the file and writes it straight back**, which is how a file still in an

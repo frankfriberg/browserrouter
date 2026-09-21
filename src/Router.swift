@@ -13,19 +13,49 @@ enum Router {
         case noWindow = "nowindow", noProfile = "noprofile", failed
     }
 
+    /// The url last routed, and when. **In memory, not on disk**: the router is resident
+    /// and waits for links, so the click before this one happened in this process. A cold
+    /// launch has no previous click to remember and does not pretend to.
+    private static var lastRouted: (url: String, at: Date)?
+
+    /// Below this a repeat is the same click delivered twice, which macOS does now and
+    /// then; above the second it is a new intention rather than a correction.
+    private static let duplicateWindow: TimeInterval = 0.4
+    private static let secondClickWindow: TimeInterval = 4
+
+    /// Whether this url is the same one just routed, clicked again on purpose.
+    private static func isSecondClick(_ url: String) -> Bool {
+        let now = Date()
+        let previous = lastRouted
+        lastRouted = (url, now)
+        guard let previous, previous.url == url else { return false }
+        let gap = now.timeIntervalSince(previous.at)
+        return gap >= duplicateWindow && gap <= secondClickWindow
+    }
+
     /// Route a url, falling back to opening it plainly whenever anything goes wrong.
     ///
     /// **It never refuses.** A link in the wrong profile is a nuisance; a link that does
     /// not open is a broken machine. That mattered less when the router sat in front of a
     /// real default browser; now that it *is* the default browser, a refusal here is a
     /// click that does nothing at all, with nowhere for the user to look.
+    /// `secondChance` is what a real click has and a scripted one does not: `--route` in
+    /// a loop is not someone clicking twice, and bouncing it to a browser would make the
+    /// CLI answer differently depending on how recently it was last run.
     @discardableResult
-    static func open(_ url: String, _ settings: Settings) -> Outcome {
+    static func open(_ url: String, _ settings: Settings, secondChance: Bool = true) -> Outcome {
         // **A rule pointing at an app is allowed to fail, and failing drops it.** The app
         // may have been deleted since the rule was written, or may refuse the link; either
         // way the link must carry on down the list exactly as if that line were not there,
         // rather than being swallowed by an app that cannot open it.
         var rules = settings.rules
+        // **The same link clicked twice in a row is a request for the web page.** An app
+        // rule is a standing guess, and this is the one moment the user can say it guessed
+        // wrong without opening the editor: every app rule is dropped, so the link falls
+        // through to whichever browser would have had it.
+        if secondChance, settings.secondClick, isSecondClick(url) {
+            rules = rules.filter { !$0.target.isApp }
+        }
         for _ in 0...settings.rules.count {
             let decision = decide(url, against: rules, fallback: settings.fallback)
             let target = decision.target
