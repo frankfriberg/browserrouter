@@ -1,0 +1,20 @@
+<h2>Click the same link twice and it opens in a browser</h2>
+
+<p>A rule that sends a link to an app is a standing guess about where that link belongs, and
+until now the only way past a wrong guess was opening the editor. The second click is the
+moment you can say <i>not that one</i>: click the same link again within four seconds and
+every app rule is skipped, so it falls through to whichever browser would otherwise have
+had it.</p>
+
+<p>Nothing else changes. The rules are untouched, the app rule is still there for the next
+link, and the same click delivered twice — which macOS does now and then — is not read as a
+correction.</p>
+
+<ul>
+  <li>The checkbox is under “Everything else” in the rules window, and it is on by default:
+      it costs nothing until a link is deliberately clicked twice.</li>
+  <li>In the rules file it is a <code>secondclick&#9;browser</code> line, and
+      <code>secondclick&#9;off</code> turns it off.</li>
+  <li><code>BrowserRouter --route</code> ignores it, so a script routing the same url in a
+      loop still answers the same way every time.</li>
+</ul>
