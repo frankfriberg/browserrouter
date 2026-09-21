@@ -13,6 +13,13 @@ struct Settings {
     /// could mean "let Dia decide"; with the router sitting where the default browser used
     /// to be, there is nothing behind it, so the fallback is named.
     var fallback: Target = .dia
+    /// **Clicking the same link twice in a row opens it in a browser.** An app rule is a
+    /// guess about what you wanted, and the only moment you can be sure it guessed wrong
+    /// is the moment you click the link again — so the second click is read as "not that,
+    /// the web page", and every app rule is dropped for it.
+    ///
+    /// On by default: it costs nothing until a link is deliberately clicked twice.
+    var secondClick: Bool = true
 }
 
 /// The rules on disk, at ~/.browser-router/rules.tsv.
@@ -50,6 +57,10 @@ enum Store {
     # broad rule added later does not shadow one that was already there.
     #
     # A `default<TAB>target` line is where a url goes when no rule claims it.
+    #
+    # A `secondclick<TAB>browser` line — the default — sends a link to a browser when you
+    # click the same one twice in a row, so an app rule can always be stepped around
+    # without editing anything. `secondclick<TAB>off` turns that off.
     #
     #
     # TARGETS
@@ -142,6 +153,13 @@ enum Store {
                 if fields.count >= 2, let target = Target(token: fields[1]) { settings.fallback = target }
                 continue
             }
+            if fields.first == "secondclick" {
+                // Anything that is not `off` leaves it on: the value names what the second
+                // click does, and a value this build does not know still means it does
+                // something.
+                settings.secondClick = fields.count >= 2 ? fields[1] != "off" : true
+                continue
+            }
             guard fields.count >= 3,
                   let target = Target(token: fields[0]),
                   let kind = Kind(rawValue: fields[1])
@@ -172,9 +190,10 @@ enum Store {
     static func save(_ settings: Settings) -> Bool {
         // **Written in list order, never sorted.** Sorting here would quietly undo every
         // drag the user made, and the order is the only place that intent is recorded.
-        let fallback = ["default\t\(settings.fallback.token)"]
+        let preamble = ["default\t\(settings.fallback.token)",
+                        "secondclick\t\(settings.secondClick ? "browser" : "off")"]
         let rules = settings.rules.map { "\($0.target.token)\t\($0.kind.rawValue)\t\($0.pattern)" }
-        let text = header + (fallback + rules).joined(separator: "\n") + "\n"
+        let text = header + (preamble + rules).joined(separator: "\n") + "\n"
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try text.write(to: file, atomically: true, encoding: .utf8)

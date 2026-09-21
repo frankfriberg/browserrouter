@@ -22,6 +22,13 @@ final class Model: ObservableObject {
         Store.save(settings)
     }
 
+    var secondClick: Bool { settings.secondClick }
+
+    func setSecondClick(_ on: Bool) {
+        settings.secondClick = on
+        Store.save(settings)
+    }
+
     /// **Inserted by specificity, never appended.** First match wins, so appending a broad
     /// rule to the bottom would look harmless and do nothing, and appending it to the top
     /// would shadow everything narrower. Placed where it would have ranked, it is right
@@ -316,6 +323,12 @@ struct RulesWindow: View {
                          target: Binding(get: { model.fallback },
                                          set: { model.setFallback($0) }),
                          allowsApp: false)
+            Divider().padding(.vertical, 4)
+            Toggle("Clicking the same link twice opens it in a browser",
+                   isOn: Binding(get: { model.secondClick },
+                                 set: { model.setSecondClick($0) }))
+            Text("The way past a rule that sends a link to an app, without editing the rule.")
+                .font(.callout).foregroundStyle(.secondary)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
