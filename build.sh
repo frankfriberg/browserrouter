@@ -16,9 +16,15 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="${BROWSERROUTER_APP:-$HOME/Applications/BrowserRouter.app}"
 # Staging builds are nobody's handler yet, so they neither register nor restart anything.
 STAGED=$([ -n "$BROWSERROUTER_APP" ] && echo 1 || echo "")
-# Ad-hoc by default; a Developer ID identity, when there is one, is what makes the dmg
-# openable on someone else's Mac without the right-click dance.
-SIGN_ID="${BROWSERROUTER_SIGN_ID:--}"
+# A Developer ID identity when this Mac has one, ad-hoc otherwise. It is what makes the
+# dmg openable on someone else's Mac without the right-click dance — and, since the tab
+# switcher arrived, **what makes a permission survive a rebuild**: an ad-hoc signature is
+# a new code hash every time, and macOS attaches the Accessibility grant to that hash, so
+# an ad-hoc build silently loses the grant the moment it is rebuilt. Override with
+# BROWSERROUTER_SIGN_ID=- for a build with no network to reach a timestamp server.
+SIGN_ID="${BROWSERROUTER_SIGN_ID:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | awk -F\" '/Developer ID Application/ {print $2; exit}')}"
+SIGN_ID="${SIGN_ID:--}"
 LS=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 rm -rf "$APP"
@@ -64,7 +70,8 @@ swiftc -swift-version 5 -O -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
   -F "$VENDOR" -framework Sparkle \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   "$ROOT/src/Browsers.swift" "$ROOT/src/Rules.swift" "$ROOT/src/Store.swift" "$ROOT/src/Router.swift" \
-  "$ROOT/src/Setup.swift" "$ROOT/src/Updater.swift" "$ROOT/src/UI.swift" "$ROOT/src/main.swift" \
+  "$ROOT/src/Setup.swift" "$ROOT/src/Updater.swift" "$ROOT/src/Switcher.swift" \
+  "$ROOT/src/UI.swift" "$ROOT/src/main.swift" \
   -o "$APP/Contents/MacOS/BrowserRouter"
 
 # The icon is drawn by src's sibling tool rather than stored as a blob, so a change to it

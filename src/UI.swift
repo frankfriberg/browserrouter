@@ -29,6 +29,45 @@ final class Model: ObservableObject {
         Store.save(settings)
     }
 
+    var tabSwitcher: Bool { !settings.tabSwitcher.isEmpty }
+
+    /// The browsers the panel can actually be taken over in: installed, and with tabs
+    /// something can read. Firefox and Zen never appear — they have no tab scripting at
+    /// all, so ⌘T there is Firefox's and stays Firefox's.
+    var switchableBrowsers: [Browser] { Browser.allCases.filter(BrowserTabs.supports) }
+
+    func switches(_ browser: Browser) -> Bool { settings.tabSwitcher.contains(browser) }
+
+    /// One browser on or off, without disturbing the others.
+    func setSwitches(_ browser: Browser, _ on: Bool) {
+        if on { settings.tabSwitcher.insert(browser) } else { settings.tabSwitcher.remove(browser) }
+        Store.save(settings)
+        if on, !Hotkey.isTrusted { Hotkey.requestTrust() }
+        switcherLive = Hotkey.install(!settings.tabSwitcher.isEmpty) && !settings.tabSwitcher.isEmpty
+    }
+    /// Whether the tap is actually running, which is not the same as the setting: the
+    /// setting is a wish and Accessibility is the answer to it.
+    @Published var switcherLive: Bool = Hotkey.isInstalled
+
+    /// **Turning it on asks for Accessibility, once.** The grant lands after the app is
+    /// restarted by System Settings or after the user flips the switch there, so a failed
+    /// install is not an error — it is the state the row below describes.
+    func setTabSwitcher(_ on: Bool) {
+        // The checkbox is every browser that can be driven; the individual ones are then
+        // turned off one at a time underneath it.
+        settings.tabSwitcher = on ? Set(switchableBrowsers) : []
+        Store.save(settings)
+        if on, !Hotkey.isTrusted { Hotkey.requestTrust() }
+        switcherLive = Hotkey.install(on) && on
+    }
+
+    /// Re-asked whenever the window comes back, because the grant is given somewhere else
+    /// entirely and nothing tells the app when it arrives.
+    func refreshSwitcher() {
+        guard !settings.tabSwitcher.isEmpty else { switcherLive = false; return }
+        switcherLive = Hotkey.install(true)
+    }
+
     /// **Inserted by specificity, never appended.** First match wins, so appending a broad
     /// rule to the bottom would look harmless and do nothing, and appending it to the top
     /// would shadow everything narrower. Placed where it would have ranked, it is right
@@ -329,8 +368,39 @@ struct RulesWindow: View {
                                  set: { model.setSecondClick($0) }))
             Text("The way past a rule that sends a link to an app, without editing the rule.")
                 .font(.callout).foregroundStyle(.secondary)
+            Divider().padding(.vertical, 4)
+            Toggle("⌘T searches the tabs you already have open",
+                   isOn: Binding(get: { model.tabSwitcher },
+                                 set: { model.setTabSwitcher($0) }))
+            if model.tabSwitcher {
+                // **Per browser, because ⌘T is not this app's to take everywhere.** The
+                // ones that cannot be read at all — Firefox, Zen — are not listed rather
+                // than listed and disabled: there is nothing to decide about them.
+                HStack(spacing: 12) {
+                    ForEach(model.switchableBrowsers) { browser in
+                        Toggle(browser.label,
+                               isOn: Binding(get: { model.switches(browser) },
+                                             set: { model.setSwitches(browser, $0) }))
+                    }
+                }
+                .padding(.leading, 20)
+            }
+            if model.tabSwitcher, !model.switcherLive {
+                HStack(spacing: 6) {
+                    Text("Needs Accessibility — BrowserRouter has to see the keystroke before Dia does.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button("Open Accessibility") {
+                        Hotkey.openAccessibilitySettings()
+                    }
+                    .buttonStyle(.link)
+                }
+            } else {
+                Text("Type part of a url — localhost:5100 — and pick a tab, or a verb like split or close.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
         }
         .padding(16)
+        .onAppear { model.refreshSwitcher() }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

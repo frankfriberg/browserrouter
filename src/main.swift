@@ -41,6 +41,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // **Installed only if the grant is already there**, never asked for here: the
+        // prompt belongs to the toggle in the editor, where somebody is looking at the
+        // app, and not to a launch that happened at login or to open a link.
+        if !Store.load().tabSwitcher.isEmpty { Hotkey.install(true) }
+        Hotkey.retryWhenBrowserAppears()
         updater = Updater(promote: { [weak self] in self?.promoteForUpdate() },
                           demote: { [weak self] in self?.demoteAfterUpdate() })
         // **A resident launch shows nothing.** It is started by launchd at login, and a
@@ -186,6 +191,13 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
         // older format gets migrated without opening the window. Everything the reader
         // understands is preserved; everything it does not was already being ignored.
         print(Store.save(settings) ? "wrote \(Store.file.path)" : "could not write \(Store.file.path)")
+    case "--switcher":
+        // **What the app can see about itself**, because everything that can go wrong
+        // with a tap is invisible: the grant, the install, and the setting are three
+        // separate yes-or-nos and only all three together are a working ⌘T.
+        print("setting\t\(Store.tabSwitcherToken(settings.tabSwitcher))")
+        print("accessibility\t\(Hotkey.isTrusted ? "granted" : "not granted")")
+        print("tap\t\(Hotkey.install(true) ? "installs" : "refused")")
     case "--list":
         print("default\t\(settings.fallback.token)")
         // In list order, because that is the order they are consulted in and the numbers
@@ -194,7 +206,7 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
             print("\(i + 1)\t\(r.target.token)\t\(r.kind.rawValue)\t\(r.pattern)")
         }
     default:
-        FileHandle.standardError.write(Data("usage: BrowserRouter [--explain|--route|--list|--save] <url>...\n".utf8))
+        FileHandle.standardError.write(Data("usage: BrowserRouter [--explain|--route|--list|--save|--switcher] <url>...\n".utf8))
         exit(2)
     }
     exit(0)
