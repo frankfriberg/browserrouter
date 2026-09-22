@@ -1,0 +1,45 @@
+<h2>⌘T searches the tabs you already have open</h2>
+
+<p>You have the page open. It is somewhere behind eleven other tabs, in a profile you were
+in an hour ago, and finding it takes longer than loading it again — so you load it again,
+and now you have it twice. This release takes ⌘T and answers that question instead: the
+panel opens with every tab the browser has, you type part of the url, and the tab you meant
+comes forward.</p>
+
+<p>Typing <code>localhost:5100</code> finds the tab on that port wherever it is. Matching is
+fuzzy and scored, so <code>lh5001</code> finds <code>localhost:5001</code> and
+<code>ghpr115</code> finds the pull request — but a real prefix always outranks a lucky one,
+and a url typed in full that matches nothing open is offered as a page to open rather than
+quietly ignored. What is not open is looked for in the browser's own history, with how long
+ago you were last there.</p>
+
+<p>The same panel takes commands, in ordinary words rather than a syntax: type
+<code>split</code> and it asks which url to open beside this one, or pick one of your open
+tabs to split against. <code>duplicate</code> puts the same page beside itself for
+comparing. <code>close</code>, <code>pin</code>, <code>reopen</code>, <code>move</code> to
+another profile, <code>clean</code> to close them all. The list is built from the browser's
+own menus each time the panel opens, so it only ever offers what that browser can actually
+do right now — “separate the panes” appears while a tab is split and not before.</p>
+
+<p>It works in Dia, Arc, Chrome, Brave, Edge, Vivaldi and Safari, each through its own
+scripting, and each one was tested by opening it and watching the right tab come forward.
+Firefox and Zen have no way to say what they have open, so ⌘T there stays theirs.</p>
+
+<ul>
+  <li>Off until you turn it on: the switch is under “Everything else” in the rules window,
+      with a checkbox per browser — ⌘T in Dia does not have to mean ⌘T in Chrome.</li>
+  <li>Turning it on asks for Accessibility, because seeing the keystroke before the browser
+      does is the only way to take a key a browser has already claimed. The grant is given
+      in System Settings and the panel starts working without a restart.</li>
+  <li>Anything the panel decides it cannot answer hands ⌘T straight back to the browser, so
+      an empty search still opens a new tab exactly as before.</li>
+  <li>Escape clears what you typed; a second escape closes the panel. What you typed last is
+      waiting, selected, the next time you open it.</li>
+  <li>⌘↩ opens what you typed even when a tab is selected — the way past a search that found
+      your tabs when you wanted the site itself.</li>
+  <li>In the rules file it is a <code>tabswitcher&#9;on</code> line, or
+      <code>tabswitcher&#9;dia,safari</code> to name browsers, and <code>off</code> to stop.</li>
+  <li>Builds are signed with a Developer ID now. An ad-hoc signature changed every build, and
+      macOS hangs the Accessibility grant off that signature — so permission had to be given
+      again after every rebuild.</li>
+</ul>
