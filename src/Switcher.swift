@@ -513,12 +513,17 @@ enum BrowserTabs {
             tell application "\(name)"
                 activate
                 if (count of windows) < \(tab.window) then return "gone"
-                set sp to space \(tab.container) of window \(tab.window)
-                if (count of tabs of sp) < \(tab.tabIndex) then return "gone"
-                if ((get URL of tab \(tab.tabIndex) of sp) as text) is not \(literal(tab.url)) then return "gone"
+                -- **`get URL of every tab`, never the url of one tab.** Arc answers -1700
+                -- to a property read on a single tab and takes the script down with it,
+                -- which is the same refusal ``Router/arcScript`` is written around — and
+                -- what made this focus fall through to the router and open the page in
+                -- the fallback browser instead.
+                set us to (get URL of every tab of space \(tab.container) of window \(tab.window))
+                if (count of us) < \(tab.tabIndex) then return "gone"
+                if ((item \(tab.tabIndex) of us) as text) is not \(literal(tab.url)) then return "gone"
                 -- `select`, not `focus`: focus is the space's verb, select is the tab's,
                 -- and selecting brings the space along with it.
-                select tab \(tab.tabIndex) of sp
+                select tab \(tab.tabIndex) of space \(tab.container) of window \(tab.window)
                 return "focused"
             end tell
             """
@@ -1071,15 +1076,31 @@ enum Hotkey {
     /// is never told — so the install is retried the next time a browser comes to the
     /// front, which is the moment before the first ⌘T that could possibly matter.
     static func retryWhenBrowserAppears() {
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
-                guard tap == nil, !Store.load().tabSwitcher.isEmpty, isTrusted else { return }
-                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-                let identifier = app?.bundleIdentifier ?? ""
-                guard Browser.allCases.contains(where: { $0.bundleIDs.contains(identifier) })
-                else { return }
-                install(true)
-            }
+        let centre = NSWorkspace.shared.notificationCenter
+        centre.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
+                           object: nil, queue: .main) { note in
+            guard tap == nil, !Store.load().tabSwitcher.isEmpty, isTrusted else { return }
+            guard isBrowser(note) else { return }
+            install(true)
+        }
+        // **A tap installed later sits in front of one installed earlier, and a browser
+        // can have its own.** Measured: Arc keeps ⌘T for its own command bar through a
+        // tap of its own, so a browser launched after this app is served first and the
+        // panel never opens — until the tap is put back at the head of the queue. Taking
+        // it down and putting it up again is the only way to get there.
+        centre.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
+                           object: nil, queue: .main) { note in
+            guard tap != nil, isBrowser(note) else { return }
+            install(false)
+            install(true)
+            Diagnostics.note("re-installed the tap ahead of a browser that just launched")
+        }
+    }
+
+    private static func isBrowser(_ note: Notification) -> Bool {
+        let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        let identifier = app?.bundleIdentifier ?? ""
+        return Browser.allCases.contains { $0.bundleIDs.contains(identifier) }
     }
 
     /// The pane the grant is given in. Deep-linked, because the list it is in is four
@@ -1511,14 +1532,24 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         hint.stringValue = "Reading \(browser.label)’s tabs…"
         action.set(nil)
         place(window)
-        // Above everything, including Dia's own windows, since Dia stays visible behind it.
+        // Above everything, including the browser's own windows, since it stays visible
+        // behind the panel.
         window.level = .floating
-        NSApp.activate(ignoringOtherApps: true)
+        // **Not `NSApp.activate`, which raises every window this app has.** With the rules
+        // editor open it came forward too, took key from the panel, and the panel dismissed
+        // itself on the spot — ⌘T appeared to do nothing at all. A non-activating panel
+        // takes key on its own without the app being activated, which is the whole reason
+        // that style mask exists.
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         window.makeFirstResponder(field)
         field.currentEditor()?.selectAll(nil)
         BrowserTabs.snapshot(browser) { [weak self] result in
-            guard let self, self.window?.isVisible == true else { return }
+            guard let self else { return }
+            guard self.window?.isVisible == true else {
+                Diagnostics.note("panel closed before the tabs arrived")
+                return
+            }
             switch result {
             case .success(let tabs):
                 self.read = .answered
