@@ -29,6 +29,15 @@ final class Model: ObservableObject {
         Store.save(settings)
     }
 
+    var searchEngine: String? { settings.searchEngine }
+
+    /// Nil is each browser's own; a template with nowhere to put the query is not saved.
+    func setSearchEngine(_ template: String?) {
+        guard template.map({ $0.contains("{searchTerms}") }) ?? true else { return }
+        settings.searchEngine = template
+        Store.save(settings)
+    }
+
     var tabSwitcher: Bool { !settings.tabSwitcher.isEmpty }
 
     /// The browsers the panel can actually be taken over in: installed, and with tabs
@@ -384,6 +393,7 @@ struct RulesWindow: View {
                     }
                 }
                 .padding(.leading, 20)
+                searchEngineRow.padding(.leading, 20)
             }
             if model.tabSwitcher, !model.switcherLive {
                 HStack(spacing: 6) {
@@ -402,6 +412,42 @@ struct RulesWindow: View {
         .padding(16)
         .onAppear { model.refreshSwitcher() }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// **Custom is a state of the picker, not a value.** A template typed by hand is only
+    /// saved once it has somewhere to put the query, so until then there is no setting
+    /// for the picker to show — this remembers that Custom was the choice.
+    @State private var customEngine = false
+    /// What is in the field, saved or not: a half-typed template would otherwise be
+    /// replaced by the last one that was valid on every keystroke.
+    @State private var customTemplate = ""
+
+    private var searchEngineRow: some View {
+        let presets = SearchEngines.presets.map(\.template)
+        let custom = customEngine || model.searchEngine.map { !presets.contains($0) } ?? false
+        return VStack(alignment: .leading, spacing: 6) {
+            Picker("Searches with", selection: Binding(
+                get: { custom ? "custom" : model.searchEngine ?? "" },
+                set: { choice in
+                    customEngine = choice == "custom"
+                    if customEngine { customTemplate = model.searchEngine ?? "" }
+                    if choice != "custom" { model.setSearchEngine(choice.isEmpty ? nil : choice) }
+                })) {
+                Text("The browser's own engine").tag("")
+                ForEach(SearchEngines.presets, id: \.template) { Text($0.name).tag($0.template) }
+                Text("Custom…").tag("custom")
+            }
+            .fixedSize()
+            if custom {
+                TextField("https://example.com/search?q={searchTerms}", text: Binding(
+                    get: { customTemplate },
+                    set: { customTemplate = $0; model.setSearchEngine($0) }))
+                    .font(.system(.body, design: .monospaced))
+                    .onAppear { if customTemplate.isEmpty { customTemplate = model.searchEngine ?? "" } }
+                Text("The url of a search, with {searchTerms} where the query goes.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var tester: some View {

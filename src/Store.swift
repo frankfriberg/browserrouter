@@ -29,6 +29,9 @@ struct Settings {
     /// **A set rather than a flag, because ⌘T is not the app's to take everywhere.**
     /// Someone who wants the panel in Dia may well want Chrome's own new tab left alone.
     var tabSwitcher: Set<Browser> = []
+    /// **One engine for every browser the panel searches from**, as a template with
+    /// `{searchTerms}` in it. None — the default — is each browser's own.
+    var searchEngine: String?
 }
 
 /// The rules on disk, at ~/.browser-router/rules.tsv.
@@ -73,6 +76,9 @@ enum Store {
     # Firefox and Zen cannot be read at all, so ⌘T is always left alone there. It needs
     # Accessibility, which is granted in the app, so turning it on here does nothing until
     # that grant exists.
+    #
+    # A `search<TAB>https://duckduckgo.com/?q={searchTerms}` line makes a search typed into
+    # that panel use this engine in every browser, instead of each browser's own.
     #
     # A `secondclick<TAB>browser` line — the default — sends a link to a browser when you
     # click the same one twice in a row, so an app rule can always be stepped around
@@ -181,6 +187,11 @@ enum Store {
                 }
                 continue
             }
+            if fields.first == "search" {
+                // A template with nowhere to put the query is not an engine.
+                if fields.count >= 2, fields[1].contains("{searchTerms}") { settings.searchEngine = fields[1] }
+                continue
+            }
             if fields.first == "secondclick" {
                 // Anything that is not `off` leaves it on: the value names what the second
                 // click does, and a value this build does not know still means it does
@@ -228,6 +239,7 @@ enum Store {
         let preamble = ["default\t\(settings.fallback.token)",
                         "secondclick\t\(settings.secondClick ? "browser" : "off")",
                         "tabswitcher\t\(Store.tabSwitcherToken(settings.tabSwitcher))"]
+            + (settings.searchEngine.map { ["search\t\($0)"] } ?? [])
         let rules = settings.rules.map { "\($0.target.token)\t\($0.kind.rawValue)\t\($0.pattern)" }
         let text = header + (preamble + rules).joined(separator: "\n") + "\n"
         do {

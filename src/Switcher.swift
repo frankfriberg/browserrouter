@@ -75,7 +75,7 @@ enum BrowserTabs {
                          _ done: @escaping (Result<[BrowserTab], Failure>) -> Void) {
         queue.async {
             asking = browser
-            let answer = run(listScript(browser))
+            let answer = run(listScript(browser), keep: true)
             let result: Result<[BrowserTab], Failure>
             switch answer {
             case .success(let text) where text == "nowindow": result = .failure(.noWindow(browser))
@@ -682,6 +682,20 @@ enum BrowserTabs {
         return q.index(after: dot) < q.endIndex
     }
 
+    /// Safari's own `search the web`, in a new tab of the window in front.
+    static func searchSafari(_ query: String) {
+        queue.async {
+            if case .failure(let failure) = run("""
+            tell application "Safari"
+                activate
+                if (count of windows) is 0 then make new document
+                tell window 1 to set current tab to (make new tab)
+                search the web in current tab of window 1 for \(literal(query))
+            end tell
+            """) { Diagnostics.note("safari search: \(failure.sentence)") }
+        }
+    }
+
     private static func literal(_ s: String) -> String {
         "\"" + s.replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"") + "\""
@@ -696,8 +710,16 @@ enum BrowserTabs {
     /// would not answer" is a shrug.
     private static var asking: Browser = .dia
 
-    private static func run(_ source: String) -> Result<String, Failure> {
-        guard let script = NSAppleScript(source: source) else {
+    /// Scripts compiled once and kept: the tab lists, which are the same text on every ⌘T
+    /// and were paying for a compile every time. Touched only on `queue`.
+    private static var compiled: [String: NSAppleScript] = [:]
+
+    private static func run(_ source: String, keep: Bool = false) -> Result<String, Failure> {
+        if keep, compiled[source] == nil, let script = NSAppleScript(source: source) {
+            var error: NSDictionary?
+            if script.compileAndReturnError(&error) { compiled[source] = script }
+        }
+        guard let script = (keep ? compiled[source] : nil) ?? NSAppleScript(source: source) else {
             return .failure(.script(code: 0, message: "The script would not compile."))
         }
         var error: NSDictionary?
@@ -788,6 +810,26 @@ struct HistoryPage: Identifiable {
     }
 }
 
+/// The engines offered in place of a browser's own. **Anything else is a custom template**
+/// and is kept as typed; these are only the ones worth not having to look up.
+enum SearchEngines {
+    static let presets: [(name: String, template: String)] = [
+        ("Google", "https://www.google.com/search?q={searchTerms}"),
+        ("DuckDuckGo", "https://duckduckgo.com/?q={searchTerms}"),
+        ("Kagi", "https://kagi.com/search?q={searchTerms}"),
+        ("Brave Search", "https://search.brave.com/search?q={searchTerms}"),
+        ("Bing", "https://www.bing.com/search?q={searchTerms}"),
+        ("Ecosia", "https://www.ecosia.org/search?q={searchTerms}"),
+    ]
+
+    /// The name a template goes by: a preset's, or its host for one typed by hand.
+    static func name(_ template: String?) -> String? {
+        guard let template else { return nil }
+        return presets.first { $0.template == template }?.name
+            ?? URL(string: template.replacingOccurrences(of: "{searchTerms}", with: ""))?.host
+    }
+}
+
 /// **Dia's history, read directly and never written to.** There is no scripting for it —
 /// the dictionary knows about windows, profiles and tabs and nothing else — but the file
 /// is an ordinary Chromium `History` database, one per profile.
@@ -825,7 +867,63 @@ enum BrowserHistory {
         }
     }
 
-    /// Pages matching `query`, the most visited first.
+    /// The url that searches for `query` with the engine the last-used profile is set to.
+    ///
+    /// **A profile that never picked one has no record of it**, and that is Chromium's
+    /// own default: Google. One that did keeps a guid in `Preferences` naming a row of the
+    /// `keywords` table in `Web Data`, or — for an engine the user added by hand — the
+    /// template itself.
+    static func searchURL(_ browser: Browser, _ query: String) -> URL? {
+        var template = "https://www.google.com/search?q={searchTerms}"
+        if let userData = userData(browser), let found = engine(in: userData) { template = found }
+        return URL(string: fill(template, query))
+    }
+
+    private static func engine(in userData: URL) -> String? {
+        let state = (try? Data(contentsOf: userData.appendingPathComponent("Local State")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let directory = (state?["profile"] as? [String: Any])?["last_used"] as? String ?? "Default"
+        let profile = userData.appendingPathComponent(directory, isDirectory: true)
+        guard let data = try? Data(contentsOf: profile.appendingPathComponent("Preferences")),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        if let custom = root["default_search_provider_data"] as? [String: Any],
+           let template = (custom["template_url_data"] as? [String: Any])?["url"] as? String {
+            return template
+        }
+        guard let guid = (root["default_search_provider"] as? [String: Any])?["guid"] as? String,
+              !guid.isEmpty
+        else { return nil }
+        let path = "file:" + profile.appendingPathComponent("Web Data").path.addingPercentEncoding(
+            withAllowedCharacters: .urlPathAllowed)! + "?immutable=1"
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK
+        else { sqlite3_close(database); return nil }
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT url FROM keywords WHERE sync_guid = ?1", -1,
+                                 &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, guid, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(statement) == SQLITE_ROW, let url = sqlite3_column_text(statement, 0)
+        else { return nil }
+        return String(cString: url)
+    }
+
+    /// A Chromium template, filled in. **Only the query and the base url mean anything
+    /// outside the browser**; the rest of its `{google:…}` parameters are tracking and
+    /// field trials, and are dropped.
+    static func fill(_ template: String, _ query: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let terms = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
+        return template
+            .replacingOccurrences(of: "{google:baseURL}", with: "https://www.google.com/")
+            .replacingOccurrences(of: "{searchTerms}", with: terms)
+            .replacingOccurrences(of: "{inputEncoding}", with: "UTF-8")
+            .replacingOccurrences(of: "\\{[^}]*\\}", with: "", options: .regularExpression)
+    }
+
+    /// Pages matching `query`, the most visited lately first.
     ///
     /// **Opened `immutable=1`, which is what makes this safe while Dia is running.** The
     /// database is locked by the browser; asking SQLite for a normal read-only handle
@@ -836,7 +934,9 @@ enum BrowserHistory {
         let text = query.trimmingCharacters(in: .whitespaces)
         guard text.count >= 2 else { return [] }
         let pattern = "%" + text.replacingOccurrences(of: " ", with: "%") + "%"
-        var pages: [HistoryPage] = []
+        // Scored so the profiles can be merged into one list: each is read separately, and
+        // in no particular order.
+        var pages: [(page: HistoryPage, score: Double)] = []
         for profile in profileDirectories(browser) {
             let file = profile.url.appendingPathComponent("History")
             guard FileManager.default.fileExists(atPath: file.path) else { continue }
@@ -849,15 +949,21 @@ enum BrowserHistory {
             defer { sqlite3_close(database) }
             // `hidden` skips the redirects and subframes nobody typed or clicked.
             let sql = """
-            SELECT url, title, last_visit_time FROM urls
+            SELECT url, title, last_visit_time,
+                   visit_count / (1.0 + (?3 - last_visit_time) / 604800000000.0) AS score
+            FROM urls
             WHERE hidden = 0 AND (url LIKE ?1 OR title LIKE ?1)
-            ORDER BY visit_count DESC, last_visit_time DESC LIMIT ?2
+            ORDER BY score DESC LIMIT ?2
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { continue }
             defer { sqlite3_finalize(statement) }
             sqlite3_bind_text(statement, 1, pattern, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
             sqlite3_bind_int(statement, 2, limit)
+            // **Frecency: visits, discounted by a week for every week since the last one.**
+            // A page opened daily keeps its count; one last opened a year ago keeps about
+            // a fiftieth of it. Chromium's clock is microseconds since 1601.
+            sqlite3_bind_int64(statement, 3, Int64((Date().timeIntervalSince1970 + 11_644_473_600) * 1_000_000))
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let url = sqlite3_column_text(statement, 0) else { continue }
                 let title = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
@@ -865,11 +971,12 @@ enum BrowserHistory {
                 let visited = stamp > 0
                     ? Date(timeIntervalSince1970: Double(stamp) / 1_000_000 - 11_644_473_600)
                     : nil
-                pages.append(HistoryPage(title: title, url: String(cString: url),
-                                         profile: profile.name, lastVisit: visited))
+                pages.append((HistoryPage(title: title, url: String(cString: url),
+                                          profile: profile.name, lastVisit: visited),
+                              sqlite3_column_double(statement, 3)))
             }
         }
-        return pages
+        return pages.sorted { $0.score > $1.score }.prefix(Int(limit)).map(\.page)
     }
 }
 
@@ -1189,6 +1296,20 @@ enum Hotkey {
             }
         }
     }
+
+    /// **A search is the browser's own engine, asked for by url.** Safari's dictionary can
+    /// search outright; a Chromium's cannot, so the engine is read from the profile and the
+    /// url built here — opened in the browser in front rather than through the rules, since
+    /// a search that lands in another browser is not the one that was asked for.
+    static func search(_ query: String, in browser: Browser) {
+        Diagnostics.note("search in \(browser.label): \(query)")
+        let chosen = Store.load().searchEngine
+        if chosen == nil, browser == .safari { BrowserTabs.searchSafari(query); return }
+        guard let url = chosen.flatMap({ URL(string: BrowserHistory.fill($0, query)) })
+                ?? BrowserHistory.searchURL(browser, query),
+              let app = browser.installedAt else { return }
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    }
 }
 
 // MARK: - The commands
@@ -1349,6 +1470,18 @@ enum Palette {
             Router.open(Palette.url(url), Store.load(), secondChance: false)
         }
 
+    /// Anything that is not a place: handed to the browser's own bar to search.
+    static func search(_ browser: Browser) -> PaletteCommand {
+        PaletteCommand(
+            verb: "search", keywords: ["find", "google", "web"], symbol: "magnifyingglass",
+            title: "Search the web",
+            hint: "With " + (SearchEngines.name(Store.load().searchEngine) ?? "\(browser.label)'s own search engine"),
+            takesURL: false) { query in
+                guard !query.isEmpty else { return }
+                Hotkey.search(query, in: browser)
+            }
+    }
+
     /// What is typed is a url without a scheme far more often than not.
     static func url(_ typed: String) -> String {
         let t = typed.trimmingCharacters(in: .whitespaces)
@@ -1450,6 +1583,27 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
     /// changed is a lie about where it came from.
     private var slideHighlight = false
     private var hint: NSTextField!
+    /// Where ↩ goes, on the right of the search row: the page, tab, engine or command
+    /// the selection stands for, in words rather than a key.
+    private var destination: NSTextField!
+    /// The engine a search goes to, named once per showing and only when the search row
+    /// is selected: finding it reads a profile, which is not worth delaying the panel for.
+    private var engineName: String?
+
+    private func engine() -> String {
+        if let engineName { return engineName }
+        let own = BrowserHistory.searchURL(browser, "")?.host
+            .map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 }
+        let name = SearchEngines.name(Store.load().searchEngine)
+            ?? (browser == .safari ? nil : own) ?? "the web"
+        engineName = name
+        return name
+    }
+
+    /// **The last list each browser answered with, shown while the next one is read.**
+    /// The read is most of the wait for rows; a list a second old is right nearly always,
+    /// and a tab closed since is caught by the url check before anything is focused.
+    private static var lastTabs: [Browser: [BrowserTab]] = [:]
     private var action: ActionBadge!
     private var tabs: [BrowserTab] = []
     /// Dia's own colour for each profile, read when the panel opens. **The selection is
@@ -1516,21 +1670,26 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         let window = window ?? build()
         self.window = window
         self.browser = browser
+        engineName = nil
         field.stringValue = Self.lastQuery
         field.placeholderString = Self.searchPrompt
         pending = nil
         history = []
         historyFor = ""
-        tabs = []
-        read = .reading
+        tabs = Self.lastTabs[browser] ?? []
+        read = tabs.isEmpty ? .reading : .answered
         shown = []
         // **Read before the panel is on screen**, while Dia is still the frontmost app
         // and its menu bar is the one the state belongs to.
-        commands = Palette.commands(browser) + [Palette.open]
+        commands = Palette.commands(browser)
+            + Palette.moveCommands(browser, profiles: BrowserTabs.profiles(tabs))
+            + [Palette.open]
         profileColours = ProfileColours.load(browser)
-        table.reloadData()
-        hint.stringValue = "Reading \(browser.label)’s tabs…"
-        action.set(nil)
+        if tabs.isEmpty { table.reloadData() } else { refilter() }
+        if tabs.isEmpty {
+            hint.stringValue = "Reading \(browser.label)’s tabs…"
+            action.set(nil)
+        }
         place(window)
         // Above everything, including the browser's own windows, since it stays visible
         // behind the panel.
@@ -1546,6 +1705,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         field.currentEditor()?.selectAll(nil)
         BrowserTabs.snapshot(browser) { [weak self] result in
             guard let self else { return }
+            if case .success(let tabs) = result { Self.lastTabs[browser] = tabs }
             guard self.window?.isVisible == true else {
                 Diagnostics.note("panel closed before the tabs arrived")
                 return
@@ -1564,7 +1724,16 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             self.commands = self.commands.filter { $0.verb != "open" }
                 + Palette.moveCommands(browser, profiles: BrowserTabs.profiles(self.tabs))
                 + [Palette.open]
+            // **An arrow pressed while the list was read is kept.** The rows under it
+            // may have moved, so the same page is found again rather than the same index.
+            let kept = self.selected.flatMap(Self.key)
             self.refilter()
+            if let kept, let row = self.shown.firstIndex(where: { Self.key($0) == kept }) {
+                self.table.selectRowIndexes([row], byExtendingSelection: false)
+                self.table.scrollRowToVisible(row)
+                self.moveHighlight()
+                self.describe(self.field.stringValue.trimmingCharacters(in: .whitespaces))
+            }
         }
     }
 
@@ -1594,6 +1763,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
     }
 
     private func build() -> SwitcherWindow {
+        watchForElsewhere()
         let window = SwitcherWindow(
             contentRect: NSRect(x: 0, y: 0, width: Metric.width, height: Metric.height),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -1638,6 +1808,16 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         field.focusRingType = .none
         field.delegate = self
         field.translatesAutoresizingMaskIntoConstraints = false
+
+        destination = NSTextField(labelWithString: "")
+        destination.font = .systemFont(ofSize: 13)
+        destination.textColor = .tertiaryLabelColor
+        destination.lineBreakMode = .byTruncatingMiddle
+        destination.alignment = .right
+        // **What was typed wins the width.** The label gives way first and truncates in
+        // the middle, where a url has the least to lose.
+        destination.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        destination.translatesAutoresizingMaskIntoConstraints = false
 
         table = NSTableView()
         table.headerView = nil
@@ -1692,7 +1872,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         // **No rules across the panel.** The search row, the list and the footer are
         // held apart by the space around them; a line through a blur is the one thing
         // that makes it look like a window with panes in it.
-        for view in [glass, field, scroll, hint, action] as [NSView] {
+        for view in [glass, field, destination, scroll, hint, action] as [NSView] {
             blur.addSubview(view)
         }
         NSLayoutConstraint.activate([
@@ -1703,7 +1883,11 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
 
             field.topAnchor.constraint(equalTo: blur.topAnchor, constant: 17),
             field.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 12),
-            field.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -Metric.gutter),
+            field.trailingAnchor.constraint(equalTo: destination.leadingAnchor, constant: -12),
+
+            destination.centerYAnchor.constraint(equalTo: field.centerYAnchor),
+            destination.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -Metric.gutter),
+            destination.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
 
             scroll.topAnchor.constraint(equalTo: blur.topAnchor, constant: Metric.searchHeight),
             scroll.leadingAnchor.constraint(equalTo: blur.leadingAnchor),
@@ -1764,7 +1948,8 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         // **The url row carries the whole query as its argument.** `open` takes what
         // follows its verb, and a url typed on its own has no verb in front of it.
         let opens = BrowserTabs.looksLikeURL(query)
-            ? [Row.command(Palette.open, argument: query)] : []
+            ? [Row.command(Palette.open, argument: query)]
+            : [Row.command(Palette.search(browser), argument: query)]
 
         shown = []
         if pending != nil {
@@ -1784,14 +1969,21 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             // A page already open is a tab, not a memory: the history rows are only the
             // ones you cannot simply be taken to.
             let openNow = Set(tabs.map(\.compact))
-            let visited = history
-                .filter { !openNow.contains($0.compact) }
-                .map(Row.page)
+            var visited = history.filter { !openNow.contains($0.compact) }
+            // **The page the browser would have autocompleted to**: the most visited one
+            // whose address starts with what was typed. It is what ↩ means in the browser's
+            // own bar, so it goes above the search rather than below the fold.
+            let lowered = query.lowercased()
+            let top = visited.firstIndex { $0.compact.lowercased().hasPrefix(lowered) }
+                .map { visited.remove(at: $0) }
+            // Fuzzy tabs go last of the pages: letters in order across an unrelated url
+            // are the weakest answer here, and must not push history out of sight.
             shown = section("Commands", rows(matched.prefix(asked)))
                 + section("Open tabs", sure)
-                + section("Open", opens)
+                + section("Top hit", top.map { [Row.page($0)] } ?? [])
+                + section(BrowserTabs.looksLikeURL(query) ? "Open" : "Search", opens)
+                + section("History", visited.map(Row.page))
                 + section(sure.isEmpty ? "Open tabs" : "Also matching", loose)
-                + section("History", visited)
                 + section("Other commands", rows(matched.dropFirst(asked)))
         }
         table.reloadData()
@@ -1806,9 +1998,15 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         rows.isEmpty ? [] : [.section(title)] + rows
     }
 
+    /// `youtube.com/feed/subscriptions` as `youtube.com`: where you land, not the path.
+    private static func host(_ compact: String) -> String {
+        String(compact.prefix { $0 != "/" && $0 != "?" && $0 != "#" })
+    }
+
     private func describe(_ query: String) {
         if let pending {
             action.set(pending.verb == "split" ? "Split here" : "Go")
+            destination.stringValue = ""
             hint.stringValue = "esc to go back · ↩ with nothing splits an empty pane"
             return
         }
@@ -1816,10 +2014,23 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             switch $0 {
             case .tab: return "Focus tab"
             case .page: return "Open"
-            case .command(let command, _): return command.verb == "open" ? "Open" : "Run"
+            case .command(let command, _): return ["open": "Open", "search": "Search"][command.verb] ?? "Run"
             case .section: return ""
             }
         })
+        destination.stringValue = self.selected.map {
+            switch $0 {
+            case .tab(let tab): return "Switch to " + Self.host(tab.compact)
+            case .page(let page): return "Go to " + Self.host(page.compact)
+            case .command(let command, let argument):
+                switch command.verb {
+                case "open": return "Open " + Self.host(argument)
+                case "search": return "Search " + engine()
+                default: return command.title
+                }
+            case .section: return ""
+            }
+        } ?? ""
         switch read {
         case .reading where shown.isEmpty:
             hint.stringValue = "Reading \(browser.label)’s tabs…"
@@ -1884,8 +2095,14 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         return shown[row]
     }
 
+    /// **Nothing is chosen until something is asked for.** An empty panel is a list to
+    /// look at; the first row is picked once a query or ↓ says which way to go — and ↩
+    /// with neither is ⌘T handed back.
     private func selectFirst() {
-        guard let first = shown.firstIndex(where: { $0.isSelectable }) else {
+        let asked = !field.stringValue.trimmingCharacters(in: .whitespaces).isEmpty || pending != nil
+        guard asked, let first = shown.firstIndex(where: { $0.isSelectable }) else {
+            table.deselectAll(nil)
+            table.scrollRowToVisible(0)
             highlight.isHidden = true
             return
         }
@@ -2002,6 +2219,12 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         dismiss(returningToBrowser: false)
         guard !query.hasPrefix(">") else { return }
         guard !query.isEmpty else { Hotkey.passThroughTab(to: browser); return }
+        openOrSearch(query)
+    }
+
+    /// A place goes through the rules like any link; anything else is a search.
+    private func openOrSearch(_ query: String) {
+        guard BrowserTabs.looksLikeURL(query) else { Hotkey.search(query, in: browser); return }
         Router.open(Palette.url(query), Store.load(), secondChance: false)
     }
 
@@ -2022,10 +2245,45 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             .first?.activate(options: [])
     }
 
+    /// What a row is, apart from where it sits: a tab's indices change when the list is
+    /// read again, its profile and url do not.
+    private static func key(_ row: Row) -> String? {
+        switch row {
+        case .section: return nil
+        case .tab(let tab): return "tab " + tab.profile + " " + tab.url
+        case .page(let page): return "page " + page.id
+        case .command(let command, let argument): return "command " + command.title + " " + argument
+        }
+    }
+
     /// Clicking anywhere else is a cancel, the same as escape.
     func windowDidResignKey(_ notification: Notification) {
+        hide()
+    }
+
+    private func hide() {
+        guard window?.isVisible == true else { return }
         Self.lastQuery = field.stringValue
         window?.orderOut(nil)
+    }
+
+    /// **Losing key is not the only way to lose the panel.** It never activates this app,
+    /// so ⌘⇥ to another app, or a click on the Dock or the menu bar, can leave it key and
+    /// on screen over something else entirely. Both are watched for directly.
+    private func watchForElsewhere() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard let self, app?.bundleIdentifier != self.browser.bundleIDs[0],
+                  app?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+            self.hide()
+        }
+        // A global monitor sees only clicks meant for other apps, so a click on the panel
+        // itself never reaches it.
+        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            self?.hide()
+        }
     }
 
     /// **⌘↩ means the url, whatever is selected.** Typing `google.com` finds every open
@@ -2041,7 +2299,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             return
         }
         dismiss(returningToBrowser: false)
-        Router.open(Palette.url(query), Store.load(), secondChance: false)
+        openOrSearch(query)
     }
 
     // MARK: Rows
@@ -2049,7 +2307,9 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
     func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        shown[row].isSelectable ? Metric.row : Metric.section
+        // **The first heading has nothing above it to be held apart from**, so it goes
+        // without the space the others use to separate one section from the last.
+        shown[row].isSelectable ? Metric.row : row == 0 ? Metric.section - 10 : Metric.section
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
