@@ -29,6 +29,28 @@ final class Model: ObservableObject {
         Store.save(settings)
     }
 
+    var tabSwitcher: Bool { settings.tabSwitcher }
+    /// Whether the tap is actually running, which is not the same as the setting: the
+    /// setting is a wish and Accessibility is the answer to it.
+    @Published var switcherLive: Bool = Hotkey.isInstalled
+
+    /// **Turning it on asks for Accessibility, once.** The grant lands after the app is
+    /// restarted by System Settings or after the user flips the switch there, so a failed
+    /// install is not an error — it is the state the row below describes.
+    func setTabSwitcher(_ on: Bool) {
+        settings.tabSwitcher = on
+        Store.save(settings)
+        if on, !Hotkey.isTrusted { Hotkey.requestTrust() }
+        switcherLive = Hotkey.install(on) && on
+    }
+
+    /// Re-asked whenever the window comes back, because the grant is given somewhere else
+    /// entirely and nothing tells the app when it arrives.
+    func refreshSwitcher() {
+        guard settings.tabSwitcher else { switcherLive = false; return }
+        switcherLive = Hotkey.install(true)
+    }
+
     /// **Inserted by specificity, never appended.** First match wins, so appending a broad
     /// rule to the bottom would look harmless and do nothing, and appending it to the top
     /// would shadow everything narrower. Placed where it would have ranked, it is right
@@ -329,8 +351,26 @@ struct RulesWindow: View {
                                  set: { model.setSecondClick($0) }))
             Text("The way past a rule that sends a link to an app, without editing the rule.")
                 .font(.callout).foregroundStyle(.secondary)
+            Divider().padding(.vertical, 4)
+            Toggle("⌘T in Dia searches the tabs you already have open",
+                   isOn: Binding(get: { model.tabSwitcher },
+                                 set: { model.setTabSwitcher($0) }))
+            if model.tabSwitcher, !model.switcherLive {
+                HStack(spacing: 6) {
+                    Text("Needs Accessibility — BrowserRouter has to see the keystroke before Dia does.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button("Open Accessibility") {
+                        Hotkey.openAccessibilitySettings()
+                    }
+                    .buttonStyle(.link)
+                }
+            } else {
+                Text("Type part of a url — localhost:5100 — and pick a tab. No match opens it instead.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
         }
         .padding(16)
+        .onAppear { model.refreshSwitcher() }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

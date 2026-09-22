@@ -20,6 +20,12 @@ struct Settings {
     ///
     /// On by default: it costs nothing until a link is deliberately clicked twice.
     var secondClick: Bool = true
+    /// **⌘T in Dia searches the tabs Dia already has open.** See ``Hotkey``.
+    ///
+    /// Off by default, and it is the one setting that cannot be turned on from the file
+    /// alone: intercepting a keystroke needs an Accessibility grant, and that is a trip
+    /// through System Settings no rules file can make on anyone's behalf.
+    var tabSwitcher: Bool = false
 }
 
 /// The rules on disk, at ~/.browser-router/rules.tsv.
@@ -57,6 +63,10 @@ enum Store {
     # broad rule added later does not shadow one that was already there.
     #
     # A `default<TAB>target` line is where a url goes when no rule claims it.
+    #
+    # A `tabswitcher<TAB>on` line makes ⌘T in Dia search the tabs already open, instead of
+    # opening a new one. It needs Accessibility, which is granted in the app, so turning it
+    # on here does nothing until that grant exists.
     #
     # A `secondclick<TAB>browser` line — the default — sends a link to a browser when you
     # click the same one twice in a row, so an app rule can always be stepped around
@@ -153,6 +163,10 @@ enum Store {
                 if fields.count >= 2, let target = Target(token: fields[1]) { settings.fallback = target }
                 continue
             }
+            if fields.first == "tabswitcher" {
+                settings.tabSwitcher = fields.count >= 2 && fields[1] == "on"
+                continue
+            }
             if fields.first == "secondclick" {
                 // Anything that is not `off` leaves it on: the value names what the second
                 // click does, and a value this build does not know still means it does
@@ -191,7 +205,8 @@ enum Store {
         // **Written in list order, never sorted.** Sorting here would quietly undo every
         // drag the user made, and the order is the only place that intent is recorded.
         let preamble = ["default\t\(settings.fallback.token)",
-                        "secondclick\t\(settings.secondClick ? "browser" : "off")"]
+                        "secondclick\t\(settings.secondClick ? "browser" : "off")",
+                        "tabswitcher\t\(settings.tabSwitcher ? "on" : "off")"]
         let rules = settings.rules.map { "\($0.target.token)\t\($0.kind.rawValue)\t\($0.pattern)" }
         let text = header + (preamble + rules).joined(separator: "\n") + "\n"
         do {
