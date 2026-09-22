@@ -20,12 +20,15 @@ struct Settings {
     ///
     /// On by default: it costs nothing until a link is deliberately clicked twice.
     var secondClick: Bool = true
-    /// **⌘T in Dia searches the tabs Dia already has open.** See ``Hotkey``.
+    /// **The browsers whose ⌘T searches the tabs they already have open.** See
+    /// ``Hotkey``. Empty is off, which is the default — and it is the one setting that
+    /// cannot be turned on from the file alone: intercepting a keystroke needs an
+    /// Accessibility grant, and that is a trip through System Settings no rules file can
+    /// make on anyone's behalf.
     ///
-    /// Off by default, and it is the one setting that cannot be turned on from the file
-    /// alone: intercepting a keystroke needs an Accessibility grant, and that is a trip
-    /// through System Settings no rules file can make on anyone's behalf.
-    var tabSwitcher: Bool = false
+    /// **A set rather than a flag, because ⌘T is not the app's to take everywhere.**
+    /// Someone who wants the panel in Dia may well want Chrome's own new tab left alone.
+    var tabSwitcher: Set<Browser> = []
 }
 
 /// The rules on disk, at ~/.browser-router/rules.tsv.
@@ -64,9 +67,12 @@ enum Store {
     #
     # A `default<TAB>target` line is where a url goes when no rule claims it.
     #
-    # A `tabswitcher<TAB>on` line makes ⌘T in Dia search the tabs already open, instead of
-    # opening a new one. It needs Accessibility, which is granted in the app, so turning it
-    # on here does nothing until that grant exists.
+    # A `tabswitcher<TAB>on` line makes ⌘T search the tabs you already have open, instead
+    # of opening a new one — in Dia, Arc, Chrome, Brave, Edge, Vivaldi and Safari. Name
+    # browsers instead of `on` to take ⌘T in those only: `tabswitcher<TAB>dia,safari`.
+    # Firefox and Zen cannot be read at all, so ⌘T is always left alone there. It needs
+    # Accessibility, which is granted in the app, so turning it on here does nothing until
+    # that grant exists.
     #
     # A `secondclick<TAB>browser` line — the default — sends a link to a browser when you
     # click the same one twice in a row, so an app rule can always be stepped around
@@ -164,7 +170,15 @@ enum Store {
                 continue
             }
             if fields.first == "tabswitcher" {
-                settings.tabSwitcher = fields.count >= 2 && fields[1] == "on"
+                // `on` is every browser this build can drive; a comma-separated list is
+                // exactly those; anything else, including `off`, is none.
+                let value = fields.count >= 2 ? fields[1] : "off"
+                if value == "on" {
+                    settings.tabSwitcher = Set(Browser.allCases)
+                } else {
+                    settings.tabSwitcher = Set(value.split(separator: ",")
+                        .compactMap { Browser(rawValue: $0.trimmingCharacters(in: .whitespaces)) })
+                }
                 continue
             }
             if fields.first == "secondclick" {
@@ -200,13 +214,20 @@ enum Store {
         try? fm.moveItem(at: legacyFile, to: file)
     }
 
+    /// `off`, `on`, or the browsers named — written back the way it would be typed.
+    static func tabSwitcherToken(_ browsers: Set<Browser>) -> String {
+        if browsers.isEmpty { return "off" }
+        if browsers == Set(Browser.allCases) { return "on" }
+        return Browser.allCases.filter(browsers.contains).map(\.rawValue).joined(separator: ",")
+    }
+
     @discardableResult
     static func save(_ settings: Settings) -> Bool {
         // **Written in list order, never sorted.** Sorting here would quietly undo every
         // drag the user made, and the order is the only place that intent is recorded.
         let preamble = ["default\t\(settings.fallback.token)",
                         "secondclick\t\(settings.secondClick ? "browser" : "off")",
-                        "tabswitcher\t\(settings.tabSwitcher ? "on" : "off")"]
+                        "tabswitcher\t\(Store.tabSwitcherToken(settings.tabSwitcher))"]
         let rules = settings.rules.map { "\($0.target.token)\t\($0.kind.rawValue)\t\($0.pattern)" }
         let text = header + (preamble + rules).joined(separator: "\n") + "\n"
         do {

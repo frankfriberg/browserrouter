@@ -44,8 +44,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // **Installed only if the grant is already there**, never asked for here: the
         // prompt belongs to the toggle in the editor, where somebody is looking at the
         // app, and not to a launch that happened at login or to open a link.
-        if Store.load().tabSwitcher { Hotkey.install(true) }
-        Hotkey.retryWhenDiaAppears()
+        if !Store.load().tabSwitcher.isEmpty { Hotkey.install(true) }
+        Hotkey.retryWhenBrowserAppears()
         updater = Updater(promote: { [weak self] in self?.promoteForUpdate() },
                           demote: { [weak self] in self?.demoteAfterUpdate() })
         // **A resident launch shows nothing.** It is started by launchd at login, and a
@@ -195,7 +195,7 @@ if let flag = arguments.first, flag.hasPrefix("--"), !resident {
         // **What the app can see about itself**, because everything that can go wrong
         // with a tap is invisible: the grant, the install, and the setting are three
         // separate yes-or-nos and only all three together are a working ⌘T.
-        print("setting\t\(settings.tabSwitcher ? "on" : "off")")
+        print("setting\t\(Store.tabSwitcherToken(settings.tabSwitcher))")
         print("accessibility\t\(Hotkey.isTrusted ? "granted" : "not granted")")
         print("tap\t\(Hotkey.install(true) ? "installs" : "refused")")
     case "--list":

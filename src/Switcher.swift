@@ -13,25 +13,31 @@ import SQLite3
 
 // MARK: - The tabs
 
-/// One open tab in Dia, addressed the way AppleScript can find it again.
+/// One open tab, addressed the way that browser's AppleScript can find it again.
 ///
-/// **The three indices are a snapshot and are treated as one.** A tab moved or closed
-/// between the panel opening and a row being picked would make them point at a different
-/// page, so `url` is carried too and checked before anything is focused.
-struct DiaTab: Identifiable {
+/// **The indices are a snapshot and are treated as one.** A tab moved or closed between
+/// the panel opening and a row being picked would make them point at a different page, so
+/// `url` is carried too and checked before anything is focused.
+///
+/// **`container` is a different thing in each family and deliberately unnamed.** It is a
+/// profile in Dia, a space in Arc, and nothing at all in Chrome or Safari, where windows
+/// hold tabs directly and it is always 1. Naming it `profile` would have made the
+/// Chromium path read as though a profile were being addressed when none can be.
+struct BrowserTab: Identifiable {
+    let browser: Browser
     let window: Int
-    let profileIndex: Int
+    let container: Int
     let tabIndex: Int
     let profile: String
     let url: String
     let title: String
 
-    var id: String { "\(window).\(profileIndex).\(tabIndex).\(url)" }
+    var id: String { "\(browser.rawValue).\(window).\(container).\(tabIndex).\(url)" }
 
     /// The url as it is typed rather than as it is stored: no scheme, no `www.`, no
     /// trailing slash. **This is the string the query is matched against**, because
     /// nobody looking for a tab types `https://`.
-    var compact: String { DiaTabs.compact(url) }
+    var compact: String { BrowserTabs.compact(url) }
 }
 
 /// **A background app cannot show you what went wrong**, so it writes it down. One line
@@ -54,7 +60,7 @@ enum Diagnostics {
     }
 }
 
-enum DiaTabs {
+enum BrowserTabs {
     /// **Off the main thread, and on one thread of its own.** Reading every tab is a
     /// round trip through Apple events; on the main queue it would freeze the panel it is
     /// filling, and `NSAppleScript` is not something to hand to a concurrent queue.
@@ -65,18 +71,20 @@ enum DiaTabs {
     /// grant — and the two look identical in a panel that only knows how to say "nothing
     /// matches", which is how an hour goes into the matching code of a feature whose
     /// permission was the problem.
-    static func snapshot(_ done: @escaping (Result<[DiaTab], Failure>) -> Void) {
+    static func snapshot(_ browser: Browser,
+                         _ done: @escaping (Result<[BrowserTab], Failure>) -> Void) {
         queue.async {
-            let answer = run(listScript)
-            let result: Result<[DiaTab], Failure>
+            asking = browser
+            let answer = run(listScript(browser))
+            let result: Result<[BrowserTab], Failure>
             switch answer {
-            case .success(let text) where text == "nowindow": result = .failure(.noWindow)
-            case .success(let text): result = .success(parse(text))
+            case .success(let text) where text == "nowindow": result = .failure(.noWindow(browser))
+            case .success(let text): result = .success(parse(text, browser))
             case .failure(let failure): result = .failure(failure)
             }
             switch (answer, result) {
             case (.success(let text), .success(let tabs)):
-                Diagnostics.note("read \(tabs.count) tabs from \(text.count) characters: "
+                Diagnostics.note("read \(tabs.count) \(browser.label) tabs from \(text.count) characters: "
                     + text.prefix(200).replacingOccurrences(of: "\n", with: "⏎"))
             case (.failure(let failure), _), (_, .failure(let failure)):
                 Diagnostics.note("read failed: \(failure.sentence)")
@@ -89,27 +97,44 @@ enum DiaTabs {
     /// number is not a diagnosis but it is the only thing that separates a permission
     /// from a script that is wrong**, and without one on screen the two are guessed at.
     enum Failure: Error {
-        case noWindow
-        case notPermitted
+        case noWindow(Browser)
+        case notPermitted(Browser)
         case script(code: Int, message: String)
 
         var sentence: String {
             switch self {
-            case .noWindow:
-                return "Dia has no window open."
-            case .notPermitted:
-                return "Dia would not answer. Allow BrowserRouter under System Settings → "
-                     + "Privacy & Security → Automation."
+            case .noWindow(let browser):
+                return "\(browser.label) has no window open."
+            case .notPermitted(let browser):
+                return "\(browser.label) would not answer. Allow BrowserRouter under System "
+                     + "Settings → Privacy & Security → Automation."
             case .script(let code, let message):
-                return "Dia answered with an error (\(code)). \(message)"
+                return "The browser answered with an error (\(code)). \(message)"
             }
         }
+    }
+
+    /// **Whether this browser can be asked what it has open at all.** Firefox and Zen
+    /// ship the boilerplate Cocoa suite with no tab class in it, so there is nothing to
+    /// list and nothing to focus — the same reason ``Router`` can never reuse a tab in
+    /// one. ⌘T is left alone in those.
+    static func supports(_ browser: Browser) -> Bool {
+        if case .gecko = browser.mechanism { return false }
+        return browser.installedAt != nil
+    }
+
+    /// The browser a keystroke belongs to, or nil when the app in front is not one this
+    /// can drive.
+    static func frontmost() -> Browser? {
+        guard let identifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        else { return nil }
+        return Browser.allCases.first { $0.bundleIDs.contains(identifier) && supports($0) }
     }
 
     /// Bring a tab forward. **The indices are verified against the url before use**: if
     /// the tab has moved, the whole thing falls back to the router, which searches every
     /// tab for that url and focuses it wherever it now is.
-    static func focus(_ tab: DiaTab) {
+    static func focus(_ tab: BrowserTab) {
         queue.async {
             if execute(focusScript(tab)) == "focused" { return }
             DispatchQueue.main.async { Router.open(tab.url, Store.load(), secondChance: false) }
@@ -122,12 +147,16 @@ enum DiaTabs {
     /// is already split.** Dia takes the write when the focused pane is a new one and
     /// silently drops it otherwise, which is exactly the shape the split command needs
     /// and the reason nothing else here navigates a tab this way.
-    static func setFrontURL(_ url: String) {
+    static func setFrontURL(_ browser: Browser, _ url: String) {
         queue.async {
+            // Safari's front tab is `current tab`; everything else here calls it `active
+            // tab`, and neither word is understood by the other.
+            let front: String
+            if case .none = browser.mechanism { front = "current tab" } else { front = "active tab" }
             _ = execute("""
-            tell application "Dia"
+            tell application "\(browser.scriptingName)"
                 if (count of windows) is 0 then return "nowindow"
-                set URL of active tab of window 1 to \(literal(url))
+                set URL of \(front) of window 1 to \(literal(url))
                 return "set"
             end tell
             """)
@@ -138,6 +167,7 @@ enum DiaTabs {
     /// does expose, and the one that is genuinely awkward by hand.
     static func moveFrontTab(toProfile profile: String) {
         queue.async {
+            // Dia only: `move` is its verb, and no other browser here publishes one.
             _ = execute("""
             tell application "Dia"
                 if (count of windows) is 0 then return "nowindow"
@@ -156,12 +186,14 @@ enum DiaTabs {
     /// **The url has to be read before the split, not after.** A tab's `URL` follows
     /// whichever pane is focused, and the pane the split opens is the new empty one, so
     /// asking afterwards answers `missing value` and duplicates nothing.
-    static func duplicateIntoSplit() {
+    static func duplicateIntoSplit(_ browser: Browser) {
         queue.async {
+            let front: String
+            if case .none = browser.mechanism { front = "current tab" } else { front = "active tab" }
             let url = execute("""
-            tell application "Dia"
+            tell application "\(browser.scriptingName)"
                 if (count of windows) is 0 then return ""
-                return (get URL of active tab of window 1) as text
+                return (get URL of \(front) of window 1) as text
             end tell
             """)
             guard let url, !url.isEmpty, url != "missing value" else {
@@ -169,10 +201,10 @@ enum DiaTabs {
                 return
             }
             DispatchQueue.main.async {
-                DiaMenu.press(.view, "Open Split Pane")
+                AppMenu.press(browser, "Open Split Pane")
                 // The new pane exists a beat after the split; `set URL` lands on it only
                 // once it is the focused one.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { setFrontURL(url) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { setFrontURL(browser, url) }
             }
         }
     }
@@ -182,12 +214,22 @@ enum DiaTabs {
     /// says why, rather than a menu item pressed at arm's length and hoped for.
     ///
     /// Counted backwards, because closing a tab renumbers the ones after it.
-    static func closeProfileTabs() {
+    static func closeFrontTabs(_ browser: Browser) {
         queue.async {
+            // **What "all" means is what the browser groups tabs by.** Dia has profiles
+            // inside a window and Arc has spaces, so closing "all" there means the one
+            // you are in; a Chromium or Safari window holds its tabs directly, so it
+            // means that window.
+            let scope: String
+            switch browser.mechanism {
+            case .dia: scope = "active profile of window 1"
+            case .arc: scope = "front window"
+            default: scope = "window 1"
+            }
             let answer = run("""
-            tell application "Dia"
+            tell application "\(browser.scriptingName)"
                 if (count of windows) is 0 then return "nowindow"
-                set p to active profile of window 1
+                set p to \(scope)
                 set n to (count of tabs of p)
                 repeat with i from n to 1 by -1
                     try
@@ -205,7 +247,7 @@ enum DiaTabs {
     }
 
     /// Every profile in the front window, in their own order: what `move` can be given.
-    static func profiles(_ tabs: [DiaTab]) -> [String] {
+    static func profiles(_ tabs: [BrowserTab]) -> [String] {
         var seen: [String] = []
         for tab in tabs where !tab.profile.isEmpty && !seen.contains(tab.profile) {
             seen.append(tab.profile)
@@ -213,14 +255,32 @@ enum DiaTabs {
         return seen
     }
 
-    /// The enumeration. Shaped after ``Router``'s Dia script, which is where the two
-    /// things this has to get right were found: profiles are indexed rather than iterated
-    /// as references, and `get` is what makes a tab's url arrive as a string.
-    private static let listScript = """
-    -- **The separators are made out here, and that is the whole reason this works.**
-    -- Inside `tell application "Dia"` the word `tab` is Dia's *tab class*, not
-    -- AppleScript's tab character: the script compiles, runs, returns a perfectly
-    -- healthy string, and every field in it is joined by the literal word "tab".
+    // MARK: Scripts
+
+    /// The enumeration, one shape per family. **Every browser here answers a different
+    /// dictionary and none of the four spellings survives a move to another**, which is
+    /// the same split ``Browser/Mechanism`` already draws for routing.
+    ///
+    /// All of them emit the same seven fields, so only the asking differs:
+    /// `window, container, tab, container name, url, is this the one in front, title`.
+    private static func listScript(_ browser: Browser) -> String {
+        switch browser.mechanism {
+        case .dia: return diaList
+        case .arc: return arcList
+        case .chromium: return flatList(browser, title: "title", active: "active tab index of window 1")
+        case .none: return safariList
+        // Never asked: `supports` refuses these before a panel is ever opened.
+        case .gecko: return ""
+        }
+    }
+
+    /// Dia: profiles are objects inside a window and a tab lives in one.
+    ///
+    /// **The separators are made outside the tell block, and that is the whole reason
+    /// this works.** Inside `tell application "Dia"` the word `tab` is Dia's *tab class*,
+    /// not AppleScript's tab character: the script compiles, runs, returns a perfectly
+    /// healthy string, and every field in it is joined by the literal word "tab".
+    private static let diaList = """
     set fieldMark to (character id 9)
     set rowMark to (character id 10)
     tell application "Dia"
@@ -243,6 +303,7 @@ enum DiaTabs {
                 end try
                 set us to {}
                 set ns to {}
+                set tl to {}
                 -- Separately, because a title the dictionary will not give up must not
                 -- cost the urls as well: a row with no title is still a row you can find.
                 try
@@ -250,6 +311,9 @@ enum DiaTabs {
                 end try
                 try
                     set ns to (get title of every tab of p)
+                end try
+                try
+                    set tl to tabs of p
                 end try
                 repeat with i from 1 to (count of us)
                     set u to ""
@@ -275,31 +339,225 @@ enum DiaTabs {
     end tell
     """
 
-    private static func focusScript(_ tab: DiaTab) -> String {
+    /// Arc: Dia's idea with none of Dia's spelling. **A space is `title`, never `name`**,
+    /// and the list has to be read with `get … of every`, both measured in ``Router/arc``
+    /// against Arc's own refusals.
+    private static let arcList = """
+    set fieldMark to (character id 9)
+    set rowMark to (character id 10)
+    tell application "Arc"
+        if (count of windows) is 0 then return "nowindow"
+        set out to ""
+        set activeID to ""
+        try
+            set activeID to (id of active tab of window 1) as text
+        end try
+        repeat with wi from 1 to (count of windows)
+            set ts to (get title of every space of window wi)
+            repeat with si from 1 to (count of ts)
+                set sn to ""
+                try
+                    set sn to (item si of ts) as text
+                end try
+                set us to {}
+                set ns to {}
+                set tl to {}
+                try
+                    set us to (get URL of every tab of space si of window wi)
+                end try
+                try
+                    set ns to (get title of every tab of space si of window wi)
+                end try
+                try
+                    set tl to tabs of space si of window wi
+                end try
+                repeat with i from 1 to (count of us)
+                    set u to ""
+                    try
+                        set u to (item i of us) as text
+                    end try
+                    set t to ""
+                    try
+                        if i is less than or equal to (count of ns) then set t to (item i of ns) as text
+                    end try
+                    if u is not "" then
+                        set isCurrent to "0"
+                        try
+                            if ((id of (item i of tl)) as text) is activeID then set isCurrent to "1"
+                        end try
+                        set out to out & wi & fieldMark & si & fieldMark & i & fieldMark & sn ¬
+                            & fieldMark & u & fieldMark & isCurrent & fieldMark & t & rowMark
+                    end if
+                end repeat
+            end repeat
+        end repeat
+        return out
+    end tell
+    """
+
+    /// Chrome, Brave, Edge and Vivaldi: **no containers at all.** A Chromium's dictionary
+    /// has never heard of profiles — each one is a separate window and nothing in the
+    /// scripting says which — so the container is always 1 and the chip is left empty
+    /// rather than filled with a guess.
+    private static func flatList(_ browser: Browser, title: String, active: String) -> String {
         """
-        tell application "Dia"
-            activate
-            if (count of windows) < \(tab.window) then return "gone"
-            set ps to profiles of window \(tab.window)
-            if (count of ps) < \(tab.profileIndex) then return "gone"
-            set p to item \(tab.profileIndex) of ps
-            set tl to tabs of p
-            if (count of tl) < \(tab.tabIndex) then return "gone"
-            set t to item \(tab.tabIndex) of tl
-            -- The snapshot may be stale by now; the url is what says whether it is.
-            if ((get URL of t) as text) is not \(literal(tab.url)) then return "gone"
-            focus t
-            return "focused"
+        set fieldMark to (character id 9)
+        set rowMark to (character id 10)
+        tell application "\(browser.scriptingName)"
+            if (count of windows) is 0 then return "nowindow"
+            set out to ""
+            set activeIndex to -1
+            try
+                set activeIndex to \(active)
+            end try
+            repeat with wi from 1 to (count of windows)
+                set us to {}
+                set ns to {}
+                -- A tab that has never loaded answers `missing value` for its URL, which
+                -- is not a string and cannot be compared.
+                try
+                    set us to (get URL of every tab of window wi)
+                end try
+                try
+                    set ns to (get \(title) of every tab of window wi)
+                end try
+                repeat with i from 1 to (count of us)
+                    set u to ""
+                    try
+                        set u to (item i of us) as text
+                    end try
+                    set t to ""
+                    try
+                        if i is less than or equal to (count of ns) then set t to (item i of ns) as text
+                    end try
+                    if u is not "" then
+                        set isCurrent to "0"
+                        if wi is 1 and i is activeIndex then set isCurrent to "1"
+                        set out to out & wi & fieldMark & 1 & fieldMark & i & fieldMark & "" ¬
+                            & fieldMark & u & fieldMark & isCurrent & fieldMark & t & rowMark
+                    end if
+                end repeat
+            end repeat
+            return out
         end tell
         """
     }
 
-    private static func parse(_ text: String) -> [DiaTab] {
+    /// Safari: tabs like a Chromium's, but **a tab is named `name`, not `title`**, and the
+    /// one in front is an object rather than an index — so it is recognised by its url.
+    private static let safariList = """
+    set fieldMark to (character id 9)
+    set rowMark to (character id 10)
+    tell application "Safari"
+        if (count of windows) is 0 then return "nowindow"
+        set out to ""
+        set activeURL to ""
+        try
+            set activeURL to (get URL of current tab of window 1) as text
+        end try
+        repeat with wi from 1 to (count of windows)
+            set us to {}
+            set ns to {}
+            try
+                set us to (get URL of every tab of window wi)
+            end try
+            try
+                set ns to (get name of every tab of window wi)
+            end try
+            repeat with i from 1 to (count of us)
+                set u to ""
+                try
+                    set u to (item i of us) as text
+                end try
+                set t to ""
+                try
+                    if i is less than or equal to (count of ns) then set t to (item i of ns) as text
+                end try
+                if u is not "" then
+                    set isCurrent to "0"
+                    if wi is 1 and u is activeURL then set isCurrent to "1"
+                    set out to out & wi & fieldMark & 1 & fieldMark & i & fieldMark & "" ¬
+                        & fieldMark & u & fieldMark & isCurrent & fieldMark & t & rowMark
+                end if
+            end repeat
+        end repeat
+        return out
+    end tell
+    """
+
+    /// Bringing one forward, which is the other half each dictionary spells its own way:
+    /// Dia focuses a tab, Arc selects one, a Chromium sets an index, and Safari is handed
+    /// the tab object itself.
+    private static func focusScript(_ tab: BrowserTab) -> String {
+        let name = tab.browser.scriptingName
+        switch tab.browser.mechanism {
+        case .dia:
+            return """
+            tell application "\(name)"
+                activate
+                if (count of windows) < \(tab.window) then return "gone"
+                set ps to profiles of window \(tab.window)
+                if (count of ps) < \(tab.container) then return "gone"
+                set p to item \(tab.container) of ps
+                set tl to tabs of p
+                if (count of tl) < \(tab.tabIndex) then return "gone"
+                set t to item \(tab.tabIndex) of tl
+                -- The snapshot may be stale by now; the url is what says whether it is.
+                if ((get URL of t) as text) is not \(literal(tab.url)) then return "gone"
+                focus t
+                return "focused"
+            end tell
+            """
+        case .arc:
+            return """
+            tell application "\(name)"
+                activate
+                if (count of windows) < \(tab.window) then return "gone"
+                set sp to space \(tab.container) of window \(tab.window)
+                if (count of tabs of sp) < \(tab.tabIndex) then return "gone"
+                if ((get URL of tab \(tab.tabIndex) of sp) as text) is not \(literal(tab.url)) then return "gone"
+                -- `select`, not `focus`: focus is the space's verb, select is the tab's,
+                -- and selecting brings the space along with it.
+                select tab \(tab.tabIndex) of sp
+                return "focused"
+            end tell
+            """
+        case .chromium:
+            return """
+            tell application "\(name)"
+                activate
+                if (count of windows) < \(tab.window) then return "gone"
+                if (count of tabs of window \(tab.window)) < \(tab.tabIndex) then return "gone"
+                if ((get URL of tab \(tab.tabIndex) of window \(tab.window)) as text) is not \(literal(tab.url)) then return "gone"
+                set active tab index of window \(tab.window) to \(tab.tabIndex)
+                set index of window \(tab.window) to 1
+                return "focused"
+            end tell
+            """
+        case .none:
+            return """
+            tell application "\(name)"
+                activate
+                if (count of windows) < \(tab.window) then return "gone"
+                if (count of tabs of window \(tab.window)) < \(tab.tabIndex) then return "gone"
+                if ((get URL of tab \(tab.tabIndex) of window \(tab.window)) as text) is not \(literal(tab.url)) then return "gone"
+                -- Safari's tabs are objects you assign, not an index you set.
+                set current tab of window \(tab.window) to tab \(tab.tabIndex) of window \(tab.window)
+                set index of window \(tab.window) to 1
+                return "focused"
+            end tell
+            """
+        case .gecko:
+            return ""
+        }
+    }
+
+    private static func parse(_ text: String, _ browser: Browser) -> [BrowserTab] {
         text.split(separator: "\n").compactMap { line in
             let fields = line.components(separatedBy: "\t")
             guard fields.count >= 7,
                   let window = Int(fields[0]),
-                  let profileIndex = Int(fields[1]),
+                  let container = Int(fields[1]),
                   let tabIndex = Int(fields[2])
             else { return nil }
             // **`missing value` is a real answer here, not a failure.** An empty split
@@ -312,8 +570,8 @@ enum DiaTabs {
             guard fields.count >= 7, fields[5] != "1" else { return nil }
             // A title with a tab in it is still one title.
             let title = fields[6...].joined(separator: "\t")
-            return DiaTab(window: window, profileIndex: profileIndex, tabIndex: tabIndex,
-                          profile: fields[3], url: fields[4], title: title)
+            return BrowserTab(browser: browser, window: window, container: container,
+                              tabIndex: tabIndex, profile: fields[3], url: fields[4], title: title)
         }
     }
 
@@ -369,7 +627,7 @@ enum DiaTabs {
     /// `localhost:5001/accounts/…` is reported as plain `localhost:5001` and could not
     /// otherwise be found by the url on its own screen. A query that starts with what the
     /// tab claims is treated as a match for it.
-    static func matches(_ query: String, in tabs: [DiaTab]) -> [DiaTab] {
+    static func matches(_ query: String, in tabs: [BrowserTab]) -> [BrowserTab] {
         ranked(query, in: tabs).map(\.0)
     }
 
@@ -377,12 +635,12 @@ enum DiaTabs {
     /// fuzzy one are not the same answer**: one is the page you asked for, the other is a
     /// page that happens to contain those letters in that order, and only the first of
     /// them should outrank "open what I typed".
-    static func ranked(_ query: String, in tabs: [DiaTab]) -> [(DiaTab, Int)] {
+    static func ranked(_ query: String, in tabs: [BrowserTab]) -> [(BrowserTab, Int)] {
         let q = compact(query)
         // Nothing typed matches everything, and every match is as good as every other.
         guard !q.isEmpty else { return tabs.map { ($0, 0) } }
         let words = q.split(separator: " ").map(String.init)
-        return tabs.compactMap { tab -> (DiaTab, Int, Int)? in
+        return tabs.compactMap { tab -> (BrowserTab, Int, Int)? in
             let haystack = tab.compact + " " + tab.title.lowercased()
             let rank: Int
             if tab.compact.hasPrefix(q) { rank = 0 }
@@ -428,6 +686,11 @@ enum DiaTabs {
         try? run(source).get()
     }
 
+    /// The browser a script is being sent to right now, for the one error that has to
+    /// name it: "Safari would not answer" is a permission to grant, and "the browser
+    /// would not answer" is a shrug.
+    private static var asking: Browser = .dia
+
     private static func run(_ source: String) -> Result<String, Failure> {
         guard let script = NSAppleScript(source: source) else {
             return .failure(.script(code: 0, message: "The script would not compile."))
@@ -439,7 +702,7 @@ enum DiaTabs {
             let message = error[NSAppleScript.errorMessage] as? String ?? ""
             // -1743 is "not authorised to send Apple events", which is the Automation
             // switch and nothing else.
-            return .failure(code == -1743 ? .notPermitted : .script(code: code, message: message))
+            return .failure(code == -1743 ? .notPermitted(asking) : .script(code: code, message: message))
         }
         return .success(result.stringValue ?? "")
     }
@@ -452,12 +715,11 @@ enum DiaTabs {
 ///
 /// Read once per panel and never written to. A missing file, a renamed key or a profile
 /// this build has never seen all end the same way: no colour, and the panel uses its own.
-enum DiaProfileColours {
-    private static let file = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Dia/User Data/Local State")
-
-    static func load() -> [String: NSColor] {
-        guard let data = try? Data(contentsOf: file),
+enum ProfileColours {
+    static func load(_ browser: Browser) -> [String: NSColor] {
+        guard let file = BrowserHistory.userData(browser)?
+                .appendingPathComponent("Local State"),
+              let data = try? Data(contentsOf: file),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let profiles = root["profile"] as? [String: Any],
               let cache = profiles["info_cache"] as? [String: Any]
@@ -496,7 +758,7 @@ struct HistoryPage: Identifiable {
     let lastVisit: Date?
 
     var id: String { profile + url }
-    var compact: String { DiaTabs.compact(url) }
+    var compact: String { BrowserTabs.compact(url) }
 
     /// How long ago, in the words a person would use. **Relative, not a date**: the
     /// question a history row answers is "was this this morning or last month", and a
@@ -524,13 +786,29 @@ struct HistoryPage: Identifiable {
 /// **Dia's history, read directly and never written to.** There is no scripting for it —
 /// the dictionary knows about windows, profiles and tabs and nothing else — but the file
 /// is an ordinary Chromium `History` database, one per profile.
-enum DiaHistory {
-    private static let userData = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Dia/User Data")
+enum BrowserHistory {
+    /// Where a browser keeps the profile directories that hold its history.
+    ///
+    /// **Every Chromium keeps the same shape in a different place**, and the support
+    /// directory is already written down per browser for the profile picker — Dia and Arc
+    /// put theirs under `User Data`, the rest are the support directory itself. Safari and
+    /// the Firefox family have neither this shape nor this schema, so they have no
+    /// history here.
+    static func userData(_ browser: Browser) -> URL? {
+        let support = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support")
+        switch browser.mechanism {
+        case .dia: return support.appendingPathComponent("Dia/User Data")
+        case .arc: return support.appendingPathComponent("Arc/User Data")
+        case .chromium(let directory): return support.appendingPathComponent(directory)
+        case .none, .gecko: return nil
+        }
+    }
 
     /// The directories holding a profile's own data, by the name that profile shows.
-    private static func profileDirectories() -> [(name: String, url: URL)] {
-        guard let data = try? Data(contentsOf: userData.appendingPathComponent("Local State")),
+    private static func profileDirectories(_ browser: Browser) -> [(name: String, url: URL)] {
+        guard let userData = userData(browser),
+              let data = try? Data(contentsOf: userData.appendingPathComponent("Local State")),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let profiles = root["profile"] as? [String: Any],
               let cache = profiles["info_cache"] as? [String: Any]
@@ -549,12 +827,12 @@ enum DiaHistory {
     /// fails or waits, and asking for an immutable one reads the file as it stands
     /// without taking a lock or writing a journal. The cost is that a page visited in the
     /// last moment may not be there yet, which for a history search is no cost at all.
-    static func search(_ query: String, limit: Int32 = 6) -> [HistoryPage] {
+    static func search(_ browser: Browser, _ query: String, limit: Int32 = 6) -> [HistoryPage] {
         let text = query.trimmingCharacters(in: .whitespaces)
         guard text.count >= 2 else { return [] }
         let pattern = "%" + text.replacingOccurrences(of: " ", with: "%") + "%"
         var pages: [HistoryPage] = []
-        for profile in profileDirectories() {
+        for profile in profileDirectories(browser) {
             let file = profile.url.appendingPathComponent("History")
             guard FileManager.default.fileExists(atPath: file.path) else { continue }
             var database: OpaquePointer?
@@ -590,6 +868,17 @@ enum DiaHistory {
     }
 }
 
+extension Browser.Mechanism {
+    /// Whether tabs live in something inside a window — a Dia profile, an Arc space —
+    /// rather than in the window itself.
+    var groupsTabs: Bool {
+        switch self {
+        case .dia, .arc: return true
+        default: return false
+        }
+    }
+}
+
 extension NSColor {
     /// The colour, or nothing when it is too pale to be one. **Dia's "Personal" seed is
     /// `#E3E6EC`** — a near-white that tints a highlight to no visible difference and a
@@ -612,15 +901,77 @@ extension NSColor {
 /// **Pressed in-process rather than through System Events.** The tap already costs an
 /// Accessibility grant; going via System Events would cost an Apple-events grant for it
 /// as well, and a second prompt for something the app can do itself.
-enum DiaMenu {
-    /// The menus this reads, and the only ones it will press.
-    enum Bar: String {
-        case file = "File", view = "View", tabs = "Tabs"
+enum AppMenu {
+    /// Every item of every top-level menu, by title, with the menu it sits in.
+    ///
+    /// **Scanned whole rather than asked menu by menu, because the menus are not the same
+    /// two browsers running.** Dia keeps its tab commands under "Tabs", Chrome under
+    /// "Tab", Safari spreads them between "Window" and "File". Searching by the item's own
+    /// title is what lets one catalogue serve all of them — and what makes the palette
+    /// offer exactly what the browser in front actually has.
+    static func index(_ browser: Browser) -> [(title: String, bar: AXUIElement, item: AXUIElement)] {
+        guard let app = application(browser),
+              let menubar = attribute(app, kAXMenuBarAttribute as String)
+        else { return [] }
+        // swiftlint:disable:next force_cast
+        var found: [(String, AXUIElement, AXUIElement)] = []
+        for bar in children(menubar as! AXUIElement) {
+            guard let menu = children(bar).first else { continue }
+            for item in children(menu) {
+                let name = title(item)
+                guard !name.isEmpty else { continue }
+                found.append((name, bar, item))
+            }
+        }
+        return found
     }
 
-    private static var dia: AXUIElement? {
-        guard let app = NSRunningApplication
-            .runningApplications(withBundleIdentifier: Browser.dia.bundleIDs[0]).first
+    /// Just the titles — what the palette checks a command against.
+    static func titles(_ browser: Browser) -> [String] { index(browser).map(\.title) }
+
+    /// Press an item by its exact title, or by its start — **"Return to github.com" names
+    /// the site it goes back to**, so the pinned command can only ever match a prefix.
+    ///
+    /// **The shortcut first, when the item has one.** A menu item that publishes a key
+    /// equivalent can be had by sending that key to the browser: no menu opens, nothing
+    /// flashes. Measured in Dia: Open Split Pane is ⌃V, and the pane commands are ⌃L
+    /// and ⌃H.
+    ///
+    /// **Otherwise the menu is opened first, and that is not decoration.** Pressing an
+    /// item in a closed menu returns `.success` and does nothing at all: a Chromium wires
+    /// its items to their actions only while their menu is on screen. Measured: "Clean Up
+    /// Tabs" answered success on every press and tidied nothing.
+    static func press(_ browser: Browser, _ titleOrPrefix: String) {
+        guard let match = index(browser).first(where: {
+            $0.title == titleOrPrefix || $0.title.hasPrefix(titleOrPrefix)
+        }) else {
+            Diagnostics.note("\(browser.label) menu → \(titleOrPrefix): no such item")
+            return
+        }
+        if let stroke = shortcut(match.item) {
+            send(stroke, to: browser)
+            Diagnostics.note("\(browser.label) menu → \(titleOrPrefix): sent its shortcut")
+            return
+        }
+        AXUIElementPerformAction(match.bar, kAXPressAction as CFString)
+        // The menu opens on the browser's own run loop, so the item is pressed after it
+        // has had a moment rather than in the same breath.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard attribute(match.item, kAXEnabledAttribute as String) as? Bool ?? true else {
+                Diagnostics.note("\(browser.label) menu → \(titleOrPrefix): disabled")
+                if let menu = children(match.bar).first {
+                    AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+                }
+                return
+            }
+            let code = AXUIElementPerformAction(match.item, kAXPressAction as CFString)
+            Diagnostics.note("\(browser.label) menu → \(titleOrPrefix): \(code.rawValue)")
+        }
+    }
+
+    private static func application(_ browser: Browser) -> AXUIElement? {
+        guard let app = NSRunningApplication.runningApplications(
+            withBundleIdentifier: browser.bundleIDs[0]).first
         else { return nil }
         return AXUIElementCreateApplication(app.processIdentifier)
     }
@@ -629,11 +980,7 @@ enum DiaMenu {
     ///
     /// **`AXMenuItemCmdModifiers` is a mask of what to *add*, with one bit inverted**: bit
     /// 3 means "no Command", which is why ⌃V arrives here as 12 rather than as 4.
-    private static func shortcut(_ bar: Bar, _ titleOrPrefix: String) -> (CGKeyCode, CGEventFlags)? {
-        guard let item = items(bar).first(where: {
-            let t = title($0)
-            return t == titleOrPrefix || t.hasPrefix(titleOrPrefix)
-        }) else { return nil }
+    private static func shortcut(_ item: AXUIElement) -> (CGKeyCode, CGEventFlags)? {
         guard let character = (attribute(item, "AXMenuItemCmdChar") as? String)?.lowercased().first,
               let code = keyCodes[character]
         else { return nil }
@@ -646,9 +993,9 @@ enum DiaMenu {
         return (code, flags)
     }
 
-    private static func send(_ stroke: (code: CGKeyCode, flags: CGEventFlags)) {
-        guard let dia = NSRunningApplication
-            .runningApplications(withBundleIdentifier: Browser.dia.bundleIDs[0]).first
+    private static func send(_ stroke: (code: CGKeyCode, flags: CGEventFlags), to browser: Browser) {
+        guard let app = NSRunningApplication.runningApplications(
+            withBundleIdentifier: browser.bundleIDs[0]).first
         else { return }
         let source = CGEventSource(stateID: .combinedSessionState)
         for down in [true, false] {
@@ -657,8 +1004,23 @@ enum DiaMenu {
             event.flags = stroke.flags
             // Stamped like the ⌘T this app hands back, so its own tap lets it through.
             event.setIntegerValueField(.eventSourceUserData, value: Hotkey.passThrough)
-            event.postToPid(dia.processIdentifier)
+            event.postToPid(app.processIdentifier)
         }
+    }
+
+    private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success
+        else { return nil }
+        return value
+    }
+
+    private static func children(_ element: AXUIElement) -> [AXUIElement] {
+        attribute(element, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
+    }
+
+    private static func title(_ element: AXUIElement) -> String {
+        attribute(element, kAXTitleAttribute as String) as? String ?? ""
     }
 
     /// **The ANSI layout, because a key code is a position and not a letter.** Only the
@@ -672,87 +1034,6 @@ enum DiaMenu {
         "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47,
         "`": 50,
     ]
-
-    private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
-        return value
-    }
-
-    private static func children(_ element: AXUIElement) -> [AXUIElement] {
-        attribute(element, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
-    }
-
-    private static func title(_ element: AXUIElement) -> String {
-        attribute(element, kAXTitleAttribute as String) as? String ?? ""
-    }
-
-    /// The top-level menu itself — File, View, Tabs — which is both where the items are
-    /// found and what has to be opened before one can be pressed.
-    private static func barItem(_ bar: Bar) -> AXUIElement? {
-        guard let dia, let menubar = attribute(dia, kAXMenuBarAttribute as String) else { return nil }
-        // swiftlint:disable:next force_cast
-        return children(menubar as! AXUIElement).first { title($0) == bar.rawValue }
-    }
-
-    /// The items of one top-level menu. **A menu is one level deeper than it looks**: the
-    /// bar item holds a menu, and the menu holds the items.
-    private static func items(_ bar: Bar) -> [AXUIElement] {
-        guard let barItem = barItem(bar), let menu = children(barItem).first else { return [] }
-        return children(menu)
-    }
-
-    /// What is in a menu right now. **Dia's menus are the capability list**: "Separate
-    /// Tabs" is there only while a tab is split, "Return to …" only on a pinned tab, so a
-    /// command that reads these is a command that cannot be offered when it would fail.
-    static func titles(_ bar: Bar) -> [String] {
-        items(bar).map(title).filter { !$0.isEmpty }
-    }
-
-    /// Press an item by its exact title, or by its start — **"Return to github.com" names
-    /// the site it goes back to**, so the pinned command can only ever match a prefix.
-    ///
-    /// **The menu is opened first, and that is not decoration.** Pressing an item in a
-    /// closed menu returns `.success` and does nothing at all: the item exists in the
-    /// accessibility tree the whole time, but Dia is a Chromium and a Chromium only wires
-    /// its menu items to anything while their menu is on screen. Measured: "Clean Up
-    /// Tabs" answered success on every press and tidied nothing.
-    static func press(_ bar: Bar, _ titleOrPrefix: String) {
-        // **The shortcut first, when the item has one.** A menu item that publishes a key
-        // equivalent can be had by sending that key to Dia: no menu opens, nothing
-        // flashes, and there is no window in which the menu could be somewhere else.
-        // Measured: Open Split Pane is ⌃V, and the pane commands are ⌃L and ⌃H.
-        if let stroke = shortcut(bar, titleOrPrefix) {
-            send(stroke)
-            Diagnostics.note("menu \(bar.rawValue) → \(titleOrPrefix): sent its shortcut")
-            return
-        }
-        guard let barItem = barItem(bar) else {
-            Diagnostics.note("menu \(bar.rawValue): not in the menu bar")
-            return
-        }
-        AXUIElementPerformAction(barItem, kAXPressAction as CFString)
-        // The menu opens on Dia's own run loop, so the item is looked for after it has
-        // had a moment rather than in the same breath.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            guard let menu = children(barItem).first else { return }
-            guard let item = children(menu).first(where: {
-                let t = title($0)
-                return t == titleOrPrefix || t.hasPrefix(titleOrPrefix)
-            }) else {
-                Diagnostics.note("menu \(bar.rawValue) → \(titleOrPrefix): no such item")
-                AXUIElementPerformAction(menu, kAXCancelAction as CFString)
-                return
-            }
-            guard attribute(item, kAXEnabledAttribute as String) as? Bool ?? true else {
-                Diagnostics.note("menu \(bar.rawValue) → \(titleOrPrefix): disabled")
-                AXUIElementPerformAction(menu, kAXCancelAction as CFString)
-                return
-            }
-            let code = AXUIElementPerformAction(item, kAXPressAction as CFString)
-            Diagnostics.note("menu \(bar.rawValue) → \(titleOrPrefix): \(code.rawValue)")
-        }
-    }
 }
 
 // MARK: - The key
@@ -787,14 +1068,16 @@ enum Hotkey {
 
     /// **The grant arrives long after it is asked for, and nothing announces it.** The
     /// prompt sends the user to System Settings, the switch is flipped there, and the app
-    /// is never told — so the install is retried the next time Dia comes to the front,
-    /// which is the moment before the first ⌘T that could possibly matter.
-    static func retryWhenDiaAppears() {
+    /// is never told — so the install is retried the next time a browser comes to the
+    /// front, which is the moment before the first ⌘T that could possibly matter.
+    static func retryWhenBrowserAppears() {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
-                guard tap == nil, Store.load().tabSwitcher, isTrusted else { return }
+                guard tap == nil, !Store.load().tabSwitcher.isEmpty, isTrusted else { return }
                 let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-                guard Browser.dia.bundleIDs.contains(app?.bundleIdentifier ?? "") else { return }
+                let identifier = app?.bundleIdentifier ?? ""
+                guard Browser.allCases.contains(where: { $0.bundleIDs.contains(identifier) })
+                else { return }
                 install(true)
             }
     }
@@ -856,18 +1139,23 @@ enum Hotkey {
         // is taken.
         let flags = event.flags.intersection([.maskCommand, .maskShift, .maskAlternate, .maskControl])
         guard flags == .maskCommand else { return Unmanaged.passUnretained(event) }
-        guard Browser.dia.bundleIDs.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
+        // **Whichever browser is in front, if it is one this can drive and one the
+        // settings name.** The tap sees every ⌘T on the machine; everything else's stays
+        // its own.
+        guard let browser = BrowserTabs.frontmost(),
+              Store.load().tabSwitcher.contains(browser)
         else { return Unmanaged.passUnretained(event) }
-        DispatchQueue.main.async { SwitcherPanel.shared.show() }
+        DispatchQueue.main.async { SwitcherPanel.shared.show(browser) }
         return nil
     }
 
-    /// Hand ⌘T back to Dia — the answer to every case this panel decides it cannot
-    /// answer. Stamped, so the tap above lets it through.
-    static func passToDia() {
-        guard let dia = NSRunningApplication.runningApplications(withBundleIdentifier: Browser.dia.bundleIDs[0]).first
+    /// Hand ⌘T back to the browser — the answer to every case this panel decides it
+    /// cannot answer. Stamped, so the tap above lets it through.
+    static func passThroughTab(to browser: Browser) {
+        guard let app = NSRunningApplication
+            .runningApplications(withBundleIdentifier: browser.bundleIDs[0]).first
         else { return }
-        dia.activate(options: [])
+        app.activate(options: [])
         // A beat, because the key has to arrive after Dia is actually in front.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             let source = CGEventSource(stateID: .combinedSessionState)
@@ -876,7 +1164,7 @@ enum Hotkey {
                                           virtualKey: CGKeyCode(keyT), keyDown: down) else { continue }
                 event.flags = .maskCommand
                 event.setIntegerValueField(.eventSourceUserData, value: passThrough)
-                event.postToPid(dia.processIdentifier)
+                event.postToPid(app.processIdentifier)
             }
         }
     }
@@ -885,7 +1173,7 @@ enum Hotkey {
 // MARK: - The commands
 
 /// One line in the palette: a verb to type, and the thing it does to the tab in front.
-struct DiaCommand: Identifiable {
+struct PaletteCommand: Identifiable {
     let verb: String
     /// The other words that mean this command. **Typed, not prefixed**: a command has to
     /// be findable by the word someone would actually reach for — "unsplit", "tidy",
@@ -909,106 +1197,130 @@ struct DiaCommand: Identifiable {
 /// only while a tab is split, "Return to …" only on a pinned one — so reading the menu is
 /// how a command that could not work is left out instead of offered and failing.
 enum Palette {
-    /// **Read while Dia is still the frontmost app**, in the moment the panel opens: a
-    /// menu belongs to the app in front, and this is what its state is being read for.
-    static func commands() -> [DiaCommand] {
-        let view = Set(DiaMenu.titles(.view))
-        let tabs = DiaMenu.titles(.tabs)
-        let file = Set(DiaMenu.titles(.file))
-        let split = tabs.contains("Separate Tabs")
-        var out: [DiaCommand] = []
+    /// A command that is a menu item somewhere in the browser's menu bar. **The title is
+    /// the key and the menu is not**: browsers file the same command under different
+    /// menus, and several of these exist in one browser and not the next.
+    private struct Entry {
+        let item: String
+        let verb: String
+        let keywords: [String]
+        let symbol: String
+        let title: String
+        let hint: String
+        /// True when `item` is the start of the real title rather than the whole of it.
+        var isPrefix = false
+    }
 
-        if view.contains("Open Split Pane") {
-            out.append(DiaCommand(
-                verb: "split",
-                keywords: ["pane", "side by side", "beside"],
-                symbol: "rectangle.split.2x1",
-                title: "Split this tab" + (split ? " again" : ""),
-                hint: "Type a url after it to open one in the new pane",
-                takesURL: true) { url in
-                    DiaMenu.press(.view, "Open Split Pane")
-                    guard !url.isEmpty else { return }
+    /// **Everything worth offering that any of these browsers can do from a menu.** What
+    /// a browser does not have simply never matches, so this is one list rather than one
+    /// list per browser — and a browser that grows a split view tomorrow gets the command
+    /// with no change here.
+    private static let catalogue: [Entry] = [
+        Entry(item: "Open Split Pane", verb: "split", keywords: ["pane", "side by side", "beside"],
+              symbol: "rectangle.split.2x1", title: "Split this tab",
+              hint: "Type a url after it to open one in the new pane"),
+        Entry(item: "Focus Next Split Pane", verb: "next", keywords: ["pane", "switch", "other"],
+              symbol: "arrow.right.to.line", title: "Focus the next pane", hint: ""),
+        Entry(item: "Focus Previous Split Pane", verb: "previous",
+              keywords: ["pane", "switch", "other", "back"],
+              symbol: "arrow.left.to.line", title: "Focus the previous pane", hint: ""),
+        Entry(item: "Separate Tabs", verb: "separate", keywords: ["unsplit", "split", "apart"],
+              symbol: "rectangle.split.2x1.slash", title: "Separate the panes into tabs",
+              hint: "Undoes the split"),
+        Entry(item: "Close Tab", verb: "close", keywords: ["quit", "pane"],
+              symbol: "xmark", title: "Close this tab", hint: ""),
+        Entry(item: "Reopen Closed Tab", verb: "reopen", keywords: ["undo", "restore", "back"],
+              symbol: "arrow.uturn.left", title: "Reopen the last closed tab", hint: ""),
+        Entry(item: "Return to ", verb: "pinned", keywords: ["reset", "return", "home", "pin"],
+              symbol: "arrow.uturn.backward", title: "Return to the pinned page",
+              hint: "Back to what this tab is pinned to", isPrefix: true),
+        Entry(item: "Edit Pinned Page", verb: "pin", keywords: ["pinned", "edit"],
+              symbol: "pin", title: "Edit the pinned page", hint: "Pin this tab here instead"),
+        Entry(item: "Pin Tab", verb: "pin", keywords: ["pinned"], symbol: "pin",
+              title: "Pin this tab", hint: ""),
+        Entry(item: "Pin", verb: "pin", keywords: ["pinned"], symbol: "pin",
+              title: "Pin this tab", hint: ""),
+        Entry(item: "Duplicate Tab", verb: "duplicate", keywords: ["copy", "clone", "same"],
+              symbol: "plus.square.on.square", title: "Duplicate this tab", hint: ""),
+        Entry(item: "Duplicate", verb: "duplicate", keywords: ["copy", "clone", "same"],
+              symbol: "plus.square.on.square", title: "Duplicate this tab", hint: ""),
+        Entry(item: "Move Tab to New Window", verb: "detach", keywords: ["window", "out", "pop"],
+              symbol: "macwindow.on.rectangle", title: "Move this tab to a new window", hint: ""),
+        Entry(item: "Merge All Windows", verb: "merge", keywords: ["windows", "gather", "one"],
+              symbol: "square.stack", title: "Merge every window into one", hint: ""),
+        Entry(item: "Mute Site", verb: "mute", keywords: ["sound", "audio", "silence"],
+              symbol: "speaker.slash", title: "Mute this site", hint: ""),
+        Entry(item: "Mute Tab", verb: "mute", keywords: ["sound", "audio", "silence"],
+              symbol: "speaker.slash", title: "Mute this tab", hint: ""),
+    ]
+
+    /// **Read while the browser is still frontmost**, in the moment the panel opens: a
+    /// menu belongs to the app in front, and this is what its state is being read for.
+    ///
+    /// The menus are the capability list — "Separate Tabs" is in Dia only while a tab is
+    /// split, "Return to …" only on a pinned one — so a command that could not work is
+    /// left out rather than offered and failing.
+    static func commands(_ browser: Browser) -> [PaletteCommand] {
+        let menu = AppMenu.titles(browser)
+        let has = { (entry: Entry) in
+            entry.isPrefix ? menu.contains { $0.hasPrefix(entry.item) } : menu.contains(entry.item)
+        }
+        var seen = Set<String>()
+        var out: [PaletteCommand] = []
+        for entry in catalogue where has(entry) && seen.insert(entry.verb + entry.title).inserted {
+            // "Close Tab" closes the focused half while a tab is split, which is the whole
+            // of Dia's answer to "close the split": there is no menu item for it.
+            let split = menu.contains("Separate Tabs")
+            let title = entry.verb == "close" && split ? "Close this pane" : entry.title
+            let hint = entry.verb == "close" && split ? "Leaves the other half of the split" : entry.hint
+            let item = entry.item
+            out.append(PaletteCommand(
+                verb: entry.verb, keywords: entry.keywords, symbol: entry.symbol,
+                title: title, hint: hint, takesURL: entry.verb == "split") { url in
+                    AppMenu.press(browser, item)
+                    guard entry.verb == "split", !url.isEmpty else { return }
                     // **The new pane has to exist before it can be given a url**, and the
                     // only signal that it does is that it is now the focused one.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        DiaTabs.setFrontURL(Palette.url(url))
+                        BrowserTabs.setFrontURL(browser, Palette.url(url))
                     }
                 })
         }
-        if view.contains("Open Split Pane") {
-            out.append(DiaCommand(
-                verb: "duplicate",
-                keywords: ["compare", "clone", "same", "side", "split"],
+        if menu.contains("Open Split Pane") {
+            out.append(PaletteCommand(
+                verb: "duplicate", keywords: ["compare", "clone", "same", "side", "split"],
                 symbol: "rectangle.split.2x1.fill",
                 title: "Duplicate this tab into a split",
                 hint: "The same page beside itself, for comparing",
-                takesURL: false) { _ in DiaTabs.duplicateIntoSplit() })
+                takesURL: false) { _ in BrowserTabs.duplicateIntoSplit(browser) })
         }
-        if split, view.contains("Focus Next Split Pane") {
-            out.append(DiaCommand(verb: "next", keywords: ["pane", "switch", "other"],
-                                  symbol: "arrow.right.to.line", title: "Focus the next pane", hint: "",
-                                  takesURL: false) { _ in DiaMenu.press(.view, "Focus Next Split Pane") })
-            out.append(DiaCommand(verb: "previous", keywords: ["pane", "switch", "other", "back"],
-                                  symbol: "arrow.left.to.line", title: "Focus the previous pane", hint: "",
-                                  takesURL: false) { _ in DiaMenu.press(.view, "Focus Previous Split Pane") })
-        }
-        if split, tabs.contains("Separate Tabs") {
-            out.append(DiaCommand(verb: "separate", keywords: ["unsplit", "split", "apart", "pane"],
-                                  symbol: "rectangle.split.2x1.slash",
-                                  title: "Separate the panes into tabs", hint: "Undoes the split",
-                                  takesURL: false) { _ in DiaMenu.press(.tabs, "Separate Tabs") })
-        }
-        if file.contains("Close Tab") {
-            // **Close means the pane while a tab is split**, which is the whole of Dia's
-            // answer to "close the split": there is no menu item for it and closing the
-            // focused half is what collapses one.
-            out.append(DiaCommand(
-                verb: "close",
-                keywords: split ? ["pane", "split", "unsplit", "quit"] : ["quit"],
-                symbol: "xmark",
-                title: split ? "Close this pane" : "Close this tab",
-                hint: split ? "Leaves the other half of the split" : "",
-                takesURL: false) { _ in DiaMenu.press(.file, "Close Tab") })
-        }
-        if let pinned = tabs.first(where: { $0.hasPrefix("Return to ") }) {
-            out.append(DiaCommand(verb: "pinned", keywords: ["reset", "return", "home", "pin"],
-                                  symbol: "arrow.uturn.backward",
-                                  title: pinned, hint: "Back to what this tab is pinned to",
-                                  takesURL: false) { _ in DiaMenu.press(.tabs, "Return to ") })
-        }
-        if tabs.contains("Edit Pinned Page") {
-            out.append(DiaCommand(verb: "pin", keywords: ["pinned", "edit"], symbol: "pin",
-                                  title: "Edit the pinned page", hint: "Pin this tab here instead",
-                                  takesURL: false) { _ in DiaMenu.press(.tabs, "Edit Pinned Page") })
-        } else if tabs.contains("Pin") {
-            out.append(DiaCommand(verb: "pin", keywords: ["pinned"], symbol: "pin",
-                                  title: "Pin this tab", hint: "",
-                                  takesURL: false) { _ in DiaMenu.press(.tabs, "Pin") })
-        }
-        // **"Close All Tabs", not "Clean Up Tabs"** — Dia's tidy leaves the tabs where
-        // they are, and closing them is what was wanted. Sent through the dictionary
-        // rather than the menu, so it does not depend on a menu being open, and it is the
-        // one command here that throws something away, so it says so plainly.
-        out.append(DiaCommand(verb: "clean", keywords: ["cleanup", "tidy", "empty", "all"],
-                              symbol: "trash", title: "Close all tabs",
-                              hint: "Every tab in this profile",
-                              takesURL: false) { _ in DiaTabs.closeProfileTabs() })
+        // **Sent through the dictionary rather than the menu**, so it does not depend on a
+        // menu being open — and it is the one command here that throws something away, so
+        // it says so plainly rather than hiding behind a word like tidy.
+        out.append(PaletteCommand(
+            verb: "clean", keywords: ["cleanup", "tidy", "empty", "all"],
+            symbol: "trash", title: "Close all tabs",
+            hint: browser.mechanism.groupsTabs ? "Every tab in this profile" : "Every tab in this window",
+            takesURL: false) { _ in BrowserTabs.closeFrontTabs(browser) })
         return out
     }
 
-    /// **One line per profile rather than a profile to type.** The names arrive with the
-    /// tabs rather than with the menus, and a name typed wrong is a command that does
-    /// nothing for a reason nobody can see.
-    static func moveCommands(profiles: [String]) -> [DiaCommand] {
-        profiles.map { profile in
-            DiaCommand(verb: "move", keywords: ["profile", "space", profile.lowercased()],
-                       symbol: "arrow.right.square", title: "Move this tab to \(profile)", hint: "",
-                       takesURL: false) { _ in DiaTabs.moveFrontTab(toProfile: profile) }
+    /// **One line per profile rather than a profile to type.** Dia only: `move` is its
+    /// verb and no other browser here publishes one — a Chromium cannot even say which
+    /// profile a window belongs to.
+    static func moveCommands(_ browser: Browser, profiles: [String]) -> [PaletteCommand] {
+        guard case .dia = browser.mechanism else { return [] }
+        return profiles.map { profile in
+            PaletteCommand(verb: "move", keywords: ["profile", "space", profile.lowercased()],
+                           symbol: "arrow.right.square", title: "Move this tab to \(profile)",
+                           hint: "", takesURL: false) { _ in
+                BrowserTabs.moveFrontTab(toProfile: profile)
+            }
         }
     }
 
-    /// Always last, and always there: the one command that needs nothing of Dia.
-    static let open = DiaCommand(
+    /// Always last, and always there: the one command that needs nothing of the browser.
+    static let open = PaletteCommand(
         verb: "open", keywords: ["new", "go", "url", "tab"], symbol: "arrow.up.forward.app",
         title: "Open a url", hint: "Through the rules, like any other link",
         takesURL: true) { url in
@@ -1041,7 +1353,7 @@ enum Palette {
     /// verb — `split`, `close`, `pin` — is an instruction and goes above the tabs; a word
     /// that merely appears somewhere in a command's wording is a guess and goes below
     /// them, where it cannot get in the way of finding a page.
-    static func matches(_ query: String, in commands: [DiaCommand]) -> [(DiaCommand, Int, String)] {
+    static func matches(_ query: String, in commands: [PaletteCommand]) -> [(PaletteCommand, Int, String)] {
         let (head, rest) = parse(query)
         guard !head.isEmpty else { return [] }
         let words = (head + " " + rest).split(separator: " ").map(String.init)
@@ -1054,7 +1366,7 @@ enum Palette {
             // Everything typed has to be in there, or `split github.com` would offer
             // every command in the palette alongside the one that was asked for.
             else if words.allSatisfy({ vocabulary.contains($0) }) { rank = 2 }
-            else if DiaTabs.fuzzy(head, command.verb) != nil { rank = 3 }
+            else if BrowserTabs.fuzzy(head, command.verb) != nil { rank = 3 }
             else { return nil }
             return (command, rank, command.takesURL ? rest : "")
         }
@@ -1118,21 +1430,25 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
     private var slideHighlight = false
     private var hint: NSTextField!
     private var action: ActionBadge!
-    private var tabs: [DiaTab] = []
+    private var tabs: [BrowserTab] = []
     /// Dia's own colour for each profile, read when the panel opens. **The selection is
     /// tinted with the colour of the profile the row lives in**, so the highlight says
     /// where a tab is as well as which one it is.
     private var profileColours: [String: NSColor] = [:]
     /// What the last read of Dia actually did: still running, answered, or refused.
     private var read: Read = .reading
-    private enum Read { case reading, answered, failed(DiaTabs.Failure) }
-    private var commands: [DiaCommand] = []
+    private enum Read { case reading, answered, failed(BrowserTabs.Failure) }
+    private var commands: [PaletteCommand] = []
     private var shown: [Row] = []
     /// **A command that has been chosen and is waiting for its url.** Splitting with
     /// nothing is a blank pane and a second trip to the address bar, so the command asks
     /// first: the panel stays open, the list becomes the tabs you could split with, and
     /// what you type or pick is what the new pane opens.
-    private var pending: DiaCommand?
+    private var pending: PaletteCommand?
+    /// **The browser the keystroke was taken from.** ⌘T is swallowed in whichever
+    /// supported browser is in front, so the panel is not about one browser — everything
+    /// it reads, lists and presses belongs to this one.
+    private var browser: Browser = .dia
     /// Pages found in Dia's history for what is typed now, and the keystroke they belong
     /// to. **The search runs off the main thread and the answer can arrive late**, so it
     /// is thrown away unless the field still says what it said when it was asked.
@@ -1148,12 +1464,12 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
     /// command, and a heading says which is which without anyone reading a row.
     private enum Row {
         case section(String)
-        case tab(DiaTab)
+        case tab(BrowserTab)
         /// Somewhere Dia has been but is not now.
         case page(HistoryPage)
         /// The url typed after the verb travels with the row, so running it does not have
         /// to re-read the field and guess at it again.
-        case command(DiaCommand, argument: String)
+        case command(PaletteCommand, argument: String)
 
         /// Headings are scenery: arrow keys go past them and ↩ cannot land on one.
         var isSelectable: Bool {
@@ -1175,9 +1491,10 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         static let section: CGFloat = 28
     }
 
-    func show() {
+    func show(_ browser: Browser) {
         let window = window ?? build()
         self.window = window
+        self.browser = browser
         field.stringValue = Self.lastQuery
         field.placeholderString = Self.searchPrompt
         pending = nil
@@ -1188,10 +1505,10 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         shown = []
         // **Read before the panel is on screen**, while Dia is still the frontmost app
         // and its menu bar is the one the state belongs to.
-        commands = Palette.commands() + [Palette.open]
-        profileColours = DiaProfileColours.load()
+        commands = Palette.commands(browser) + [Palette.open]
+        profileColours = ProfileColours.load(browser)
         table.reloadData()
-        hint.stringValue = "Reading Dia’s tabs…"
+        hint.stringValue = "Reading \(browser.label)’s tabs…"
         action.set(nil)
         place(window)
         // Above everything, including Dia's own windows, since Dia stays visible behind it.
@@ -1200,7 +1517,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(field)
         field.currentEditor()?.selectAll(nil)
-        DiaTabs.snapshot { [weak self] result in
+        BrowserTabs.snapshot(browser) { [weak self] result in
             guard let self, self.window?.isVisible == true else { return }
             switch result {
             case .success(let tabs):
@@ -1214,7 +1531,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             // a menu read from behind can answer differently; only the part that came
             // from the tabs is added.
             self.commands = self.commands.filter { $0.verb != "open" }
-                + Palette.moveCommands(profiles: DiaTabs.profiles(self.tabs))
+                + Palette.moveCommands(browser, profiles: BrowserTabs.profiles(self.tabs))
                 + [Palette.open]
             self.refilter()
         }
@@ -1383,6 +1700,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
     /// Ask the history for what is in the field, and fold the answer in when it lands.
     private func searchHistory() {
         let query = field.stringValue.trimmingCharacters(in: .whitespaces)
+        let browser = self.browser
         guard pending == nil, !query.hasPrefix(">"), query.count >= 2 else {
             history = []
             historyFor = ""
@@ -1391,7 +1709,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         guard query != historyFor else { return }
         historyFor = query
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let pages = DiaHistory.search(query)
+            let pages = BrowserHistory.search(browser, query)
             DispatchQueue.main.async {
                 guard let self, self.historyFor == query else { return }
                 self.history = pages
@@ -1404,17 +1722,17 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         let query = field.stringValue.trimmingCharacters(in: .whitespaces)
         let matched = Palette.matches(query, in: commands)
         let asked = matched.prefix { $0.1 <= 1 }.count
-        let rows = { (slice: ArraySlice<(DiaCommand, Int, String)>) in
+        let rows = { (slice: ArraySlice<(PaletteCommand, Int, String)>) in
             slice.map { Row.command($0.0, argument: $0.2) }
         }
-        let found = DiaTabs.ranked(query, in: tabs)
+        let found = BrowserTabs.ranked(query, in: tabs)
         // A page that starts with, contains, or is contained by what was typed is the one
         // asked for; anything found only by fuzzy matching is a suggestion.
         let sure = found.filter { $0.1 <= 2 }.map { Row.tab($0.0) }
         let loose = found.filter { $0.1 > 2 }.map { Row.tab($0.0) }
         // **The url row carries the whole query as its argument.** `open` takes what
         // follows its verb, and a url typed on its own has no verb in front of it.
-        let opens = DiaTabs.looksLikeURL(query)
+        let opens = BrowserTabs.looksLikeURL(query)
             ? [Row.command(Palette.open, argument: query)] : []
 
         shown = []
@@ -1422,7 +1740,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             // No commands while one is being completed: the only thing a second verb
             // could do here is replace the first one halfway through.
             shown = section("Split with an open tab", query.isEmpty
-                ? tabs.map(Row.tab) : DiaTabs.matches(query, in: tabs).map(Row.tab))
+                ? tabs.map(Row.tab) : BrowserTabs.matches(query, in: tabs).map(Row.tab))
         } else if query.hasPrefix(">") {
             shown = section("Commands", rows(matched[...]))
         } else if query.isEmpty {
@@ -1473,7 +1791,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         })
         switch read {
         case .reading where shown.isEmpty:
-            hint.stringValue = "Reading Dia’s tabs…"
+            hint.stringValue = "Reading \(browser.label)’s tabs…"
         // **Named, not swallowed.** Dia refusing to be asked is a permission to grant,
         // and it is nothing at all like a query that found no page.
         case .failed(let failure):
@@ -1482,7 +1800,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             if !shown.isEmpty {
                 hint.stringValue = "↑↓ to choose · ⌘↩ opens what you typed · esc to clear"
             } else if query.isEmpty {
-                hint.stringValue = "No open tabs. ↩ hands ⌘T back to Dia."
+                hint.stringValue = "No open tabs. ↩ hands ⌘T back to \(browser.label)."
             } else {
                 hint.stringValue = "Nothing matches. ↩ opens \(query)."
             }
@@ -1516,7 +1834,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
                 refilter()
                 return true
             }
-            dismiss(returningToDia: true)
+            dismiss(returningToBrowser: true)
             return true
         case #selector(NSResponder.moveDown(_:)):
             move(by: 1)
@@ -1619,7 +1937,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             if case .tab(let tab)? = selected, !tab.url.isEmpty { url = tab.url }
             if case .page(let page)? = selected { url = page.url }
             self.pending = nil
-            dismiss(returningToDia: true)
+            dismiss(returningToBrowser: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 pending.run(url.isEmpty ? "" : Palette.url(url))
             }
@@ -1630,10 +1948,10 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             case .section:
                 return
             case .tab(let tab):
-                dismiss(returningToDia: false)
-                DiaTabs.focus(tab)
+                dismiss(returningToBrowser: false)
+                BrowserTabs.focus(tab)
             case .page(let page):
-                dismiss(returningToDia: false)
+                dismiss(returningToBrowser: false)
                 Router.open(page.url, Store.load(), secondChance: false)
             case .command(let command, let argument):
                 // A command that opens a url and was given none asks for one rather than
@@ -1645,31 +1963,31 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
                 // **Dia has to be in front before a menu item is pressed**: the menu
                 // belongs to the app that owns it, and the split it opens belongs to
                 // whichever window is frontmost.
-                dismiss(returningToDia: true)
+                dismiss(returningToBrowser: true)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { command.run(argument) }
             }
             return
         }
-        dismiss(returningToDia: false)
+        dismiss(returningToBrowser: false)
         guard !query.hasPrefix(">") else { return }
-        guard !query.isEmpty else { Hotkey.passToDia(); return }
+        guard !query.isEmpty else { Hotkey.passThroughTab(to: browser); return }
         Router.open(Palette.url(query), Store.load(), secondChance: false)
     }
 
     /// Hand the panel over to a command that still needs a url.
-    private func begin(_ command: DiaCommand) {
+    private func begin(_ command: PaletteCommand) {
         pending = command
         field.stringValue = ""
         field.placeholderString = "\(command.title) — type a url, or pick a tab"
         refilter()
     }
 
-    private func dismiss(returningToDia: Bool) {
+    private func dismiss(returningToBrowser: Bool) {
         Self.lastQuery = field.stringValue
         window?.orderOut(nil)
-        guard returningToDia else { return }
+        guard returningToBrowser else { return }
         NSRunningApplication
-            .runningApplications(withBundleIdentifier: Browser.dia.bundleIDs[0])
+            .runningApplications(withBundleIdentifier: browser.bundleIDs[0])
             .first?.activate(options: [])
     }
 
@@ -1687,11 +2005,11 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         guard !query.isEmpty else { return }
         if let pending {
             self.pending = nil
-            dismiss(returningToDia: true)
+            dismiss(returningToBrowser: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pending.run(Palette.url(query)) }
             return
         }
-        dismiss(returningToDia: false)
+        dismiss(returningToBrowser: false)
         Router.open(Palette.url(query), Store.load(), secondChance: false)
     }
 
