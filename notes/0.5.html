@@ -1,0 +1,30 @@
+<h2>⌘T goes where you meant, open or not</h2>
+
+<p>The ⌘T panel has a name now: Navigator. In 0.4 it found the tabs you already had open.
+Now it covers the rest of what ⌘T is for. Type a few letters of a site and the page you
+visit most that starts with them is the top row, so <code>you</code> goes to youtube.com.
+Anything that isn't an address is a web search. Your history is ranked by how often and
+how recently you visited each page, across every profile, and fuzzy matches against open
+tabs sit below that.</p>
+
+<p>The search uses the browser's own engine, read from the profile (in Safari, its own
+“search the web”). To use one engine in every browser, pick it in “Searches with” under the ⌘T switch
+in the rules window, or add a <code>search&#9;template</code> line to the rules file.</p>
+
+<ul>
+  <li>The row under the cursor says where ↩ goes: “Go to youtube.com”, or “Search
+      google.com”.</li>
+  <li>Nothing is selected until you type or press ↓, so ↩ on an empty panel still opens a
+      new tab the way it always did.</li>
+  <li>Rows appear at once from the last list Navigator read, and the list is refreshed
+      behind them.</li>
+  <li>Navigator hides when you switch to another app or click outside it.</li>
+  <li>Pasting a paragraph gives you one search: line breaks become spaces, and the field
+      stays one line that scrolls sideways.</li>
+  <li>Type <code>settings</code> to open the BrowserRouter rules window without reaching
+      for the mouse.</li>
+  <li>Titles and addresses now line up on one line, and shortcut keys sit in square
+      keycaps.</li>
+  <li>The rules file still calls it <code>tabswitcher</code>, so existing rules keep
+      working.</li>
+</ul>
