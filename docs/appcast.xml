@@ -3,6 +3,47 @@
     <channel>
         <title>BrowserRouter</title>
         <item>
+            <title>0.5</title>
+            <pubDate>Wed, 23 Sep 2026 22:19:20 +0200</pubDate>
+            <link>https://github.com/frankfriberg/browserrouter</link>
+            <sparkle:version>28</sparkle:version>
+            <sparkle:shortVersionString>0.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h2>⌘T goes where you meant, open or not</h2>
+
+<p>The ⌘T panel has a name now: Navigator. In 0.4 it found the tabs you already had open.
+Now it covers the rest of what ⌘T is for. Type a few letters of a site and the page you
+visit most that starts with them is the top row, so <code>you</code> goes to youtube.com.
+Anything that isn't an address is a web search. Your history is ranked by how often and
+how recently you visited each page, across every profile, and fuzzy matches against open
+tabs sit below that.</p>
+
+<p>The search uses the browser's own engine, read from the profile (in Safari, its own
+“search the web”). To use one engine in every browser, pick it in “Searches with” under the ⌘T switch
+in the rules window, or add a <code>search&#9;template</code> line to the rules file.</p>
+
+<ul>
+  <li>The row under the cursor says where ↩ goes: “Go to youtube.com”, or “Search
+      google.com”.</li>
+  <li>Nothing is selected until you type or press ↓, so ↩ on an empty panel still opens a
+      new tab the way it always did.</li>
+  <li>Rows appear at once from the last list Navigator read, and the list is refreshed
+      behind them.</li>
+  <li>Navigator hides when you switch to another app or click outside it.</li>
+  <li>Pasting a paragraph gives you one search: line breaks become spaces, and the field
+      stays one line that scrolls sideways.</li>
+  <li>Type <code>settings</code> to open the BrowserRouter rules window without reaching
+      for the mouse.</li>
+  <li>Titles and addresses now line up on one line, and shortcut keys sit in square
+      keycaps.</li>
+  <li>The rules file still calls it <code>tabswitcher</code>, so existing rules keep
+      working.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/frankfriberg/browserrouter/releases/download/v0.5/BrowserRouter-0.5.zip" length="1644780" type="application/octet-stream" sparkle:edSignature="XkzIphjBpGlDvarlm5choQF5YW42qOXDo7HlZnAlMKNhrSJMdqpBHMCWGlXtn7BL06rwsxXwPdBSCoQCTmpXBA=="/>
+        </item>
+        <item>
             <title>0.3</title>
             <pubDate>Mon, 21 Sep 2026 11:31:18 +0200</pubDate>
             <link>https://github.com/frankfriberg/browserrouter</link>
@@ -71,25 +112,6 @@ appears. A pattern that does not match is an app declining the link, so
 </ul>
 ]]></description>
             <enclosure url="https://github.com/frankfriberg/browserrouter/releases/download/v0.2/BrowserRouter-0.2.zip" length="1505629" type="application/octet-stream" sparkle:edSignature="dQoIL1ACvOVAKgnN4VuPbG0CsSHcFSX6AE1CvmMwm7ZXucG6M8IlEnX/eRLzZNPA7WxS1uKwOCxzmM3gQHg0Cw=="/>
-        </item>
-        <item>
-            <title>0.1</title>
-            <pubDate>Fri, 18 Sep 2026 11:06:47 +0200</pubDate>
-            <link>https://github.com/frankfriberg/browserrouter</link>
-            <sparkle:version>10</sparkle:version>
-            <sparkle:shortVersionString>0.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<h2>First release</h2>
-<p>Sends each link to the right browser, and the right profile inside it.</p>
-<ul>
-  <li>Rules by host, url prefix, a word in the path, or a regular expression — the most specific one wins, whatever order they are in.</li>
-  <li>Dia, Arc, Chrome, Brave, Edge, Vivaldi, Safari, Firefox and Zen, each addressed the way it actually allows.</li>
-  <li>A tab already showing the link is focused rather than opened twice, wherever the browser allows that to be asked.</li>
-  <li>Links for Linear, Figma, Notion, Slack, Teams, Asana, Discord, Zoom and Spotify can skip the browser entirely.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/frankfriberg/browserrouter/releases/download/v0.1/BrowserRouter-0.1.zip" length="1484712" type="application/octet-stream" sparkle:edSignature="SvyduLEGVc50FV+YYHkf/3rZoRayDd8+DoLIWoaBRZPZGvjv+Oqk//TuBo/Pyn6KrXNPd/24WJGY5mqU1GxwBw=="/>
         </item>
     </channel>
 </rss>
