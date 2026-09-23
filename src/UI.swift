@@ -378,7 +378,7 @@ struct RulesWindow: View {
             Text("The way past a rule that sends a link to an app, without editing the rule.")
                 .font(.callout).foregroundStyle(.secondary)
             Divider().padding(.vertical, 4)
-            Toggle("⌘T searches the tabs you already have open",
+            Toggle("Navigator — ⌘T finds your tabs, your history, or the web",
                    isOn: Binding(get: { model.tabSwitcher },
                                  set: { model.setTabSwitcher($0) }))
             if model.tabSwitcher {

@@ -1470,6 +1470,13 @@ enum Palette {
             Router.open(Palette.url(url), Store.load(), secondChance: false)
         }
 
+    /// BrowserRouter's own window, for the rules and the search engine, without leaving
+    /// the keyboard to find the app.
+    static let settings = PaletteCommand(
+        verb: "settings", keywords: ["preferences", "rules", "config", "browserrouter"],
+        symbol: "gearshape", title: "Open BrowserRouter settings", hint: "The rules window",
+        takesURL: false) { _ in (NSApp.delegate as? Delegate)?.openEditor() }
+
     /// Anything that is not a place: handed to the browser's own bar to search.
     static func search(_ browser: Browser) -> PaletteCommand {
         PaletteCommand(
@@ -1683,7 +1690,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         // and its menu bar is the one the state belongs to.
         commands = Palette.commands(browser)
             + Palette.moveCommands(browser, profiles: BrowserTabs.profiles(tabs))
-            + [Palette.open]
+            + [Palette.open, Palette.settings]
         profileColours = ProfileColours.load(browser)
         if tabs.isEmpty { table.reloadData() } else { refilter() }
         if tabs.isEmpty {
@@ -1721,9 +1728,9 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             // **The menus are not read again here.** Dia is behind the panel by now and
             // a menu read from behind can answer differently; only the part that came
             // from the tabs is added.
-            self.commands = self.commands.filter { $0.verb != "open" }
+            self.commands = self.commands.filter { $0.verb != "open" && $0.verb != "settings" }
                 + Palette.moveCommands(browser, profiles: BrowserTabs.profiles(self.tabs))
-                + [Palette.open]
+                + [Palette.open, Palette.settings]
             // **An arrow pressed while the list was read is kept.** The rows under it
             // may have moved, so the same page is found again rather than the same index.
             let kept = self.selected.flatMap(Self.key)
@@ -1806,6 +1813,12 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
+        // **One line, whatever is pasted.** A plain field wraps and grows past the glass;
+        // this keeps it to a row that scrolls sideways.
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.lineBreakMode = .byClipping
         field.delegate = self
         field.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1908,8 +1921,22 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
     // MARK: Filtering
 
     func controlTextDidChange(_ notification: Notification) {
+        flattenLineBreaks()
         searchHistory()
         refilter()
+    }
+
+    /// **A pasted paragraph is one search.** Line breaks become single spaces, so the
+    /// field, the rows and the query all see the same one line.
+    private func flattenLineBreaks() {
+        let text = field.stringValue
+        guard text.rangeOfCharacter(from: .newlines) != nil else { return }
+        let flat = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        field.stringValue = flat
+        field.currentEditor()?.selectedRange = NSRange(location: (flat as NSString).length, length: 0)
     }
 
     /// Ask the history for what is in the field, and fold the answer in when it lands.
@@ -2440,7 +2467,14 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             meta.alignment = .right
             meta.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
-            let stack = NSStackView(views: [icon, title, detail, NSView(), meta, trailing])
+            // **The title and url sit on one line**, not two centres: a 13pt title and a
+            // 12pt url centred on their own boxes land at different heights, and the eye
+            // reads that as a mistake. The date belongs with the chip, so it centres.
+            let text = NSStackView(views: [title, detail])
+            text.orientation = .horizontal
+            text.alignment = .firstBaseline
+            text.spacing = 8
+            let stack = NSStackView(views: [icon, text, NSView(), meta, trailing])
             stack.orientation = .horizontal
             stack.alignment = .centerY
             stack.spacing = 8
@@ -2470,7 +2504,7 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             // **A symbol this build does not have is no symbol at all**, not a blank box:
             // the names below are ordinary ones, but the list moves between releases.
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-            icon.contentTintColor = isCommand ? .controlAccentColor : .secondaryLabelColor
+            icon.contentTintColor = isCommand ? .labelColor : .secondaryLabelColor
             return self
         }
     }
@@ -2526,19 +2560,27 @@ final class SwitcherPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate,
             key.font = .systemFont(ofSize: 11, weight: .semibold)
             key.textColor = .secondaryLabelColor
             key.alignment = .center
-            key.wantsLayer = true
-            key.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.1).cgColor
-            key.layer?.cornerRadius = 4
+            key.translatesAutoresizingMaskIntoConstraints = false
+            // **A square keycap with the glyph in its middle.** A label draws its text from
+            // the top of its frame, so the box is a view of its own and the glyph is
+            // centred inside it rather than stretched to fill it.
+            let cap = NSView()
+            cap.wantsLayer = true
+            cap.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.1).cgColor
+            cap.layer?.cornerRadius = 4
+            cap.addSubview(key)
 
-            let stack = NSStackView(views: [label, key])
+            let stack = NSStackView(views: [label, cap])
             stack.orientation = .horizontal
             stack.alignment = .centerY
             stack.spacing = 6
             stack.translatesAutoresizingMaskIntoConstraints = false
             addSubview(stack)
             NSLayoutConstraint.activate([
-                key.widthAnchor.constraint(equalToConstant: 18),
-                key.heightAnchor.constraint(equalToConstant: 16),
+                cap.widthAnchor.constraint(equalToConstant: 16),
+                cap.heightAnchor.constraint(equalToConstant: 16),
+                key.centerXAnchor.constraint(equalTo: cap.centerXAnchor),
+                key.centerYAnchor.constraint(equalTo: cap.centerYAnchor),
                 stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
                 stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
                 stack.topAnchor.constraint(equalTo: topAnchor, constant: 4),

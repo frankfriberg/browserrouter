@@ -63,13 +63,19 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Spotlight activates the resident process rather than starting a second one, so
     /// without this the app would appear to do nothing at all.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openEditor()
+        return true
+    }
+
+    /// The editor brought forward if it is open, made if it is not. Also what the ⌘T
+    /// panel's `settings` command reaches for, since the panel lives in this process.
+    func openEditor() {
         if let window {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
             showEditor()
         }
-        return true
     }
 
     /// Closing the editor puts the router back to waiting; it does not stop it.
